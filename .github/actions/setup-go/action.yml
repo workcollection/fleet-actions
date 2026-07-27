@@ -1,0 +1,28 @@
+name: 'Fleet setup-go'
+description: 'actions/setup-go on one pin, with the fleet default version.'
+author: 'workcollection'
+
+# 53 repos use setup-go and 52 pass `go-version: 'stable'`. Pins split v7 x34, v5 x16,
+# v6 x2. Same story as setup-python: identical intent, three pins, drift only.
+
+inputs:
+  go-version:
+    description: 'Go version'
+    required: false
+    default: 'stable'
+  cache:
+    description: 'Enable module/build caching'
+    required: false
+    default: 'true'
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-go@v7
+      with:
+        go-version: ${{ inputs.go-version }}
+        cache: ${{ inputs.cache }}
+
+branding:
+  icon: 'code'
+  color: 'purple'

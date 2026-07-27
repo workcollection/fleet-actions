@@ -1,0 +1,151 @@
+name: 'Fleet setup-php'
+description: 'PHP for fleet CI: use what the runner already has, else install with retry, else fall back to shivammathur/setup-php.'
+author: 'workcollection'
+
+# Why this exists
+# ---------------
+# The mari ARC pods ship no PHP, so every PHP job paid a 44-184s apt install and ~30%
+# of them flaked out on a transient apt/network error. That is one bad minute in a
+# hundred jobs turning into a red matrix leg nobody trusts.
+#
+# Three ordered paths, cheapest first:
+#   1. PROBE   - a matching php is already on PATH (baked runner image, or a warm pod).
+#                Costs one `php -v`. When PHP is finally baked into the image, every
+#                caller silently lands here and nothing else in this file ever runs.
+#   2. RETRY   - install from the ondrej PPA in a bounded retry loop. This is the path
+#                that actually kills the flake: transient apt failures get another go
+#                instead of failing the job.
+#   3. FALLBACK- shivammathur/setup-php@v2, the well-maintained upstream action, if our
+#                own install did not produce a usable php.
+#
+# Note on the shape: composite-action steps do NOT support `continue-on-error`, so a
+# step that fails takes the whole action with it. Every step below that is allowed to
+# fail therefore swallows its own errors in bash and reports through an output instead.
+# That is why the retry lives in a `run:` block rather than around the `uses:`.
+
+inputs:
+  php-version:
+    description: 'Major.minor PHP version, e.g. 8.4'
+    required: false
+    default: '8.4'
+  extensions:
+    description: >-
+      Comma-separated extension list. The default is the exact set 9 fleet repos
+      already share. Extensions PHP 8 builds in (json, curl on most distros) are
+      harmless to list - the installer skips packages that do not exist.
+    required: false
+    default: 'pdo, pdo_mysql, curl, json'
+  coverage:
+    description: 'Coverage driver for the fallback path: none | xdebug | pcov'
+    required: false
+    default: 'none'
+  tools:
+    description: 'Extra tools for the fallback path, e.g. composer'
+    required: false
+    default: ''
+
+outputs:
+  php-version:
+    description: 'The full version string of the PHP that ended up on PATH'
+    value: ${{ steps.verify.outputs.version }}
+  path-taken:
+    description: 'preinstalled | apt | fallback - which of the three paths satisfied the request'
+    value: ${{ steps.verify.outputs.path_taken }}
+
+runs:
+  using: composite
+  steps:
+    - id: probe
+      shell: bash
+      run: |
+        set -uo pipefail
+        want='${{ inputs.php-version }}'
+        if command -v php >/dev/null 2>&1; then
+          have="$(php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;' 2>/dev/null || echo '')"
+          if [ "$have" = "$want" ]; then
+            echo "hit=true" >> "$GITHUB_OUTPUT"
+            echo "PHP $have already present - skipping install." >&2
+            exit 0
+          fi
+          echo "PHP $have present but $want requested." >&2
+        fi
+        echo "hit=false" >> "$GITHUB_OUTPUT"
+
+    - id: apt
+      if: steps.probe.outputs.hit != 'true'
+      shell: bash
+      run: |
+        # Bounded retry around the exact operation that flakes. Never fails the step:
+        # a false `ok` just hands over to the upstream action below.
+        set -uo pipefail
+        want='${{ inputs.php-version }}'
+        exts='${{ inputs.extensions }}'
+        echo "ok=false" >> "$GITHUB_OUTPUT"
+
+        if ! command -v apt-get >/dev/null 2>&1; then
+          echo "no apt-get on this runner - deferring to the fallback action." >&2
+          exit 0
+        fi
+        SUDO=''; [ "$(id -u)" -ne 0 ] && SUDO='sudo'
+
+        pkgs="php${want}-cli"
+        IFS=',' read -ra E <<< "$exts"
+        for e in "${E[@]}"; do
+          e="$(echo "$e" | tr -d '[:space:]')"
+          [ -z "$e" ] && continue
+          case "$e" in
+            json)             continue ;;   # built into PHP 8
+            pdo_mysql|mysqli) pkgs="$pkgs php${want}-mysql" ;;
+            pdo)              continue ;;   # ships with php-cli
+            *)                pkgs="$pkgs php${want}-${e}" ;;
+          esac
+        done
+
+        for attempt in 1 2 3; do
+          echo "::group::apt attempt ${attempt}/3"
+          rc=0
+          { $SUDO apt-get update -qq \
+            && $SUDO apt-get install -y --no-install-recommends software-properties-common \
+            && $SUDO add-apt-repository -y ppa:ondrej/php \
+            && $SUDO apt-get update -qq \
+            && $SUDO apt-get install -y --no-install-recommends $pkgs ; } || rc=$?
+          echo "::endgroup::"
+          if [ "$rc" -eq 0 ] && command -v "php${want}" >/dev/null 2>&1; then
+            $SUDO update-alternatives --set php "/usr/bin/php${want}" >/dev/null 2>&1 || true
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "attempt ${attempt} failed (rc=${rc}); retrying after backoff." >&2
+          sleep $(( attempt * 5 ))
+        done
+        echo "all apt attempts failed - deferring to the fallback action." >&2
+
+    - name: Fallback to shivammathur/setup-php
+      if: steps.probe.outputs.hit != 'true' && steps.apt.outputs.ok != 'true'
+      uses: shivammathur/setup-php@v2
+      with:
+        php-version: ${{ inputs.php-version }}
+        extensions: ${{ inputs.extensions }}
+        coverage: ${{ inputs.coverage }}
+        tools: ${{ inputs.tools }}
+
+    - id: verify
+      shell: bash
+      run: |
+        # Fail loudly HERE rather than three steps later in the caller's build, where
+        # "php: command not found" reads like the repo's own bug.
+        set -uo pipefail
+        if ! command -v php >/dev/null 2>&1; then
+          echo "::error::fleet setup-php: no php on PATH after all three paths." && exit 1
+        fi
+        v="$(php -v | head -1)"
+        if [ '${{ steps.probe.outputs.hit }}' = 'true' ]; then taken=preinstalled
+        elif [ '${{ steps.apt.outputs.ok }}' = 'true' ]; then taken=apt
+        else taken=fallback; fi
+        echo "version=${v}" >> "$GITHUB_OUTPUT"
+        echo "path_taken=${taken}" >> "$GITHUB_OUTPUT"
+        echo "${v} (via ${taken})" >> "$GITHUB_STEP_SUMMARY"
+
+branding:
+  icon: 'code'
+  color: 'purple'

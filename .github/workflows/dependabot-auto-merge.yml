@@ -1,0 +1,81 @@
+# Dependabot reaper - merges green Dependabot PRs.
+#
+# Reusable form of the workflow that sat in 43 repos as 36 byte-exact versions. All 43
+# ran the SAME single job with the SAME 27-line script (byte-identical in the 40 that
+# carry it inline); the drift was a github-script pin (v9 x38 vs v7 x2) and whitespace.
+#
+# Runner-independent by design: actions/github-script runs on the runner's bundled Node,
+# so no `gh` CLI is needed - an ARC/k8s runner image cannot provide one. Merges via the
+# REST API with the auto-provided GITHUB_TOKEN; a scheduled run grants pull-requests:write,
+# so no PAT or org secret is involved.
+#
+# `branch-filter` was hard-coded to minor-and-patch in all 43 copies, which is why only
+# grouped PRs were ever auto-merged (t-9fe48f: 18 of 472 fleet PRs). It is an INPUT here
+# so the policy can be widened once, in one place, instead of edited in 43 files.
+name: Dependabot auto-merge (fleet)
+
+on:
+  workflow_call:
+    inputs:
+      runs-on:
+        description: 'Runner label(s)'
+        type: string
+        required: false
+        default: 'self-hosted'
+      branch-filter:
+        description: 'Regex a Dependabot branch must match to be eligible. Default keeps the historical grouped-only policy.'
+        type: string
+        required: false
+        default: 'minor-and-patch'
+      merge-method:
+        description: 'merge | squash | rebase'
+        type: string
+        required: false
+        default: 'squash'
+
+permissions:
+  contents: write
+  pull-requests: write
+  checks: read      # read PR check-run state (github-script)
+  statuses: read    # read legacy commit-status state
+
+jobs:
+  reap:
+    runs-on: ${{ inputs.runs-on }}
+    steps:
+      - name: Merge green Dependabot PRs
+        uses: actions/github-script@v9
+        env:
+          BRANCH_FILTER: ${{ inputs.branch-filter }}
+          MERGE_METHOD: ${{ inputs.merge-method }}
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const prs = await github.paginate(github.rest.pulls.list, {
+              owner, repo, state: 'open', per_page: 100,
+            });
+            for (const pr of prs) {
+              const isDependabot = pr.user && (pr.user.login === 'dependabot[bot]' || pr.user.login === 'app/dependabot');
+              if (!isDependabot) continue;
+              if (!new RegExp(process.env.BRANCH_FILTER).test(pr.head.ref)) continue;
+
+              const sha = pr.head.sha;
+              const [{ data: combined }, { data: checks }] = await Promise.all([
+                github.rest.repos.getCombinedStatusForRef({ owner, repo, ref: sha }),
+                github.rest.checks.listForRef({ owner, repo, ref: sha, per_page: 100 }),
+              ]);
+              const runs = checks.check_runs.filter(c => c.name !== 'Merge green Dependabot PRs');
+              const pending = combined.state === 'pending' || runs.some(c => c.status !== 'completed');
+              const failed  = ['failure', 'error'].includes(combined.state) ||
+                runs.some(c => c.conclusion && !['success', 'neutral', 'skipped'].includes(c.conclusion));
+
+              if (pending) { core.info(`#${pr.number}: checks pending -> skip`); continue; }
+              if (failed)  { core.info(`#${pr.number}: checks failing -> skip`); continue; }
+              try {
+                await github.rest.pulls.merge({ owner, repo, pull_number: pr.number, merge_method: process.env.MERGE_METHOD });
+                core.info(`#${pr.number}: merged`);
+                try { await github.rest.git.deleteRef({ owner, repo, ref: `heads/${pr.head.ref}` }); } catch (_) {}
+              } catch (e) {
+                core.info(`#${pr.number}: merge deferred — ${e.message}`);
+              }
+            }

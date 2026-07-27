@@ -1,0 +1,109 @@
+name: 'Fleet docker build & push'
+description: 'buildx build/push to GHCR with a GitHub Actions cache policy that fits inside the 10GB budget.'
+author: 'workcollection'
+
+# Why this is not just docker/build-push-action
+# ---------------------------------------------
+# 7 fleet repos build with buildx, 6 push to GHCR, and 6 of them pass
+# `cache-to: type=gha,mode=max`. mode=max exports EVERY intermediate layer, and the
+# GitHub Actions cache is capped at 10GB PER REPO. combined-news sat at 10.7GB/10GB
+# (t-198ca9) - over budget, so the cache evicts itself constantly and the "cache" makes
+# builds slower than no cache at all.
+#
+# So the default here is mode=min (final layers only), plus a ref-scoped cache key so a
+# branch build cannot evict main's cache. mode=max stays available per-repo for the rare
+# multi-stage build that genuinely benefits - but it has to be asked for, not inherited
+# by copy-paste.
+
+inputs:
+  context:
+    description: 'Build context'
+    required: false
+    default: '.'
+  file:
+    description: 'Dockerfile path'
+    required: false
+    default: ''
+  image:
+    description: 'Image name without registry, e.g. owner/name. Defaults to the repo.'
+    required: false
+    default: ''
+  tags:
+    description: 'Explicit tags (newline separated). Empty derives sensible ones.'
+    required: false
+    default: ''
+  push:
+    description: 'Push, or build only'
+    required: false
+    default: 'true'
+  platforms:
+    description: 'Target platforms'
+    required: false
+    default: ''
+  cache-mode:
+    description: 'min (default, fits the 10GB budget) or max (opt-in, only for builds that prove it helps)'
+    required: false
+    default: 'min'
+  registry:
+    description: 'Container registry'
+    required: false
+    default: 'ghcr.io'
+
+outputs:
+  image-ref:
+    description: 'The primary pushed image reference'
+    value: ${{ steps.meta.outputs.primary }}
+
+runs:
+  using: composite
+  steps:
+    - id: meta
+      shell: bash
+      run: |
+        set -uo pipefail
+        img='${{ inputs.image }}'
+        [ -z "$img" ] && img="${GITHUB_REPOSITORY}"
+        img="$(echo "$img" | tr '[:upper:]' '[:lower:]')"   # registries reject uppercase
+        reg='${{ inputs.registry }}'
+        tags='${{ inputs.tags }}'
+        if [ -z "$tags" ]; then
+          sha_tag="${reg}/${img}:sha-$(echo "$GITHUB_SHA" | cut -c1-12)"
+          if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
+            tags="${reg}/${img}:${GITHUB_REF_NAME}"$'\n'"${reg}/${img}:latest"$'\n'"${sha_tag}"
+          else
+            safe="$(echo "${GITHUB_REF_NAME:-unknown}" | tr '/' '-')"
+            tags="${reg}/${img}:${safe}"$'\n'"${sha_tag}"
+          fi
+        fi
+        {
+          echo 'tags<<__EOT__'
+          echo "$tags"
+          echo '__EOT__'
+        } >> "$GITHUB_OUTPUT"
+        echo "primary=$(echo "$tags" | head -1)" >> "$GITHUB_OUTPUT"
+        # Scope the cache per ref so a feature branch cannot evict main's entry.
+        echo "scope=${GITHUB_REPOSITORY##*/}-$(echo "${GITHUB_REF_NAME:-main}" | tr '/' '-')" >> "$GITHUB_OUTPUT"
+
+    - uses: docker/setup-buildx-action@v4
+
+    - name: Log in to the registry
+      if: inputs.push == 'true'
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ inputs.registry }}
+        username: ${{ github.actor }}
+        password: ${{ github.token }}
+
+    - uses: docker/build-push-action@v6
+      with:
+        context: ${{ inputs.context }}
+        file: ${{ inputs.file }}
+        push: ${{ inputs.push == 'true' }}
+        tags: ${{ steps.meta.outputs.tags }}
+        platforms: ${{ inputs.platforms }}
+        cache-from: type=gha,scope=${{ steps.meta.outputs.scope }}
+        cache-to: type=gha,mode=${{ inputs.cache-mode }},scope=${{ steps.meta.outputs.scope }}
+
+branding:
+  icon: 'package'
+  color: 'purple'

@@ -1,0 +1,24 @@
+name: 'Fleet setup-buildx'
+description: 'docker/setup-buildx-action on one pin.'
+author: 'workcollection'
+
+# 21 repos use docker/setup-buildx-action and ALL 21 pass zero arguments. The only thing
+# that differs between them is the pin (v4 x16, v3 x4, v3.7.1 x1). There is nothing to
+# configure here - which is exactly why it should be one line instead of 21 copies.
+
+inputs:
+  driver-opts:
+    description: 'Optional buildx driver options'
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - uses: docker/setup-buildx-action@v4
+      with:
+        driver-opts: ${{ inputs.driver-opts }}
+
+branding:
+  icon: 'package'
+  color: 'purple'

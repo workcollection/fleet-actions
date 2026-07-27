@@ -1,0 +1,38 @@
+name: 'Fleet setup-dotnet'
+description: 'setup-dotnet with the fleet defaults, including the DOTNET_INSTALL_DIR export 12 repos were duplicating.'
+author: 'workcollection'
+
+# 21 repos call actions/setup-dotnet across three pins (v6 x16, v5 x2, v4 x3); 11 of them
+# effectively ask for the same 8.0.x. Twelve ALSO carry an identical
+# `echo "DOTNET_INSTALL_DIR=$HOME/.dotnet" >> $GITHUB_ENV` step immediately before it -
+# a self-hosted-runner workaround that has to run BEFORE the install or it does nothing.
+# Folding it in here means it cannot be forgotten or ordered wrong again.
+
+inputs:
+  dotnet-version:
+    description: 'SDK version(s). Multiline is allowed, e.g. "8.0.x\n9.0.x".'
+    required: false
+    default: '8.0.x'
+  install-dir:
+    description: 'Where to install the SDK on self-hosted runners. Empty disables the export.'
+    required: false
+    default: '$HOME/.dotnet'
+
+runs:
+  using: composite
+  steps:
+    - name: Point the SDK install at a writable dir
+      if: inputs.install-dir != ''
+      shell: bash
+      run: |
+        # Must precede setup-dotnet: the action reads this at install time. Self-hosted
+        # runners have no writable /usr/share/dotnet, so the default location fails.
+        echo "DOTNET_INSTALL_DIR=${{ inputs.install-dir }}" >> "$GITHUB_ENV"
+
+    - uses: actions/setup-dotnet@v6
+      with:
+        dotnet-version: ${{ inputs.dotnet-version }}
+
+branding:
+  icon: 'box'
+  color: 'purple'

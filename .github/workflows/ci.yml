@@ -1,0 +1,81 @@
+# This repo's own CI. It exists because a bad commit here breaks CI in ~65 repos at
+# once, so nothing reaches the v1 tag without lint + a real execution of every composite.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: '${{ github.workflow }}-${{ github.ref }}'
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  lint:
+    name: actionlint + YAML parse
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Parse every action/workflow as YAML
+        run: |
+          python3 - <<'PY'
+          import sys, glob, pathlib
+          try:
+              import yaml
+          except ImportError:
+              sys.exit("pyyaml missing")
+          bad = 0
+          for p in glob.glob('.github/**/*.yml', recursive=True):
+              try:
+                  yaml.safe_load(open(p))
+                  print(f"ok   {p}")
+              except Exception as e:
+                  print(f"FAIL {p}: {e}"); bad += 1
+          sys.exit(bad)
+          PY
+      - name: actionlint
+        run: |
+          V=1.7.7
+          curl -sSL "https://github.com/rhysd/actionlint/releases/download/v${V}/actionlint_${V}_linux_amd64.tar.gz" \
+            | tar -xz -C /tmp actionlint
+          # Composite action files are not workflows; actionlint only reads workflows.
+          /tmp/actionlint -color
+
+  smoke:
+    name: Smoke - every composite actually runs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: setup-python composite
+        uses: ./.github/actions/setup-python
+      - run: python3 --version
+
+      - name: setup-go composite
+        uses: ./.github/actions/setup-go
+      - run: go version
+
+      - name: setup-dotnet composite
+        uses: ./.github/actions/setup-dotnet
+        with: { dotnet-version: '8.0.x' }
+      - run: dotnet --version
+
+      - name: setup-buildx composite
+        uses: ./.github/actions/setup-buildx
+      - run: docker buildx version
+
+      - id: php
+        name: setup-php composite
+        uses: ./.github/actions/setup-php
+        with: { php-version: '8.3' }
+      - name: Assert php works and report which path was taken
+        run: |
+          php -v
+          php -r 'exit(PHP_MAJOR_VERSION === 8 ? 0 : 1);'
+          echo "path taken: ${{ steps.php.outputs.path-taken }}"

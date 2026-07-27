@@ -1,0 +1,30 @@
+name: 'Fleet setup-python'
+description: 'actions/setup-python on one pin, with the fleet default version.'
+author: 'workcollection'
+
+# 57 repos use setup-python and 52 pass literally `python-version: '3.12'`. The only real
+# variation is the PIN: v7 x28, v6 x8, v5 x16. That skew is pure drift - three different
+# versions of the same action doing the same thing - and it is what Dependabot keeps
+# opening PRs about in 57 places at once. One indirection, one pin, one PR.
+
+inputs:
+  python-version:
+    description: 'Python version'
+    required: false
+    default: '3.12'
+  cache:
+    description: 'Dependency cache to enable: pip | pipenv | poetry. Empty disables it.'
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@v7
+      with:
+        python-version: ${{ inputs.python-version }}
+        cache: ${{ inputs.cache }}
+
+branding:
+  icon: 'code'
+  color: 'purple'

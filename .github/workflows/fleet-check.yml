@@ -1,0 +1,91 @@
+# Fleet hygiene assertions, run in CI instead of discovered weeks later by a scan.
+#
+# Everything here was previously audited out-of-band by Python on the dev box
+# (hygiene.py, secfleet.py audit, the dependabot coverage sweep). That means drift was
+# found on a schedule - a repo could sit wrong for a month. Running the same assertions
+# as a PR check moves the finding to the moment the drift is introduced.
+#
+# Advisory by default (`strict: false`) so adopting it cannot redden 60 repos at once.
+# Flip a repo to strict once it is clean.
+name: Fleet check
+
+on:
+  workflow_call:
+    inputs:
+      runs-on:
+        type: string
+        required: false
+        default: 'self-hosted'
+      strict:
+        description: 'Fail the job on findings instead of only reporting them.'
+        type: boolean
+        required: false
+        default: false
+      require-license:
+        type: boolean
+        required: false
+        default: true
+      require-dependabot:
+        type: boolean
+        required: false
+        default: true
+      require-security-scan:
+        type: boolean
+        required: false
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Fleet hygiene
+    runs-on: ${{ inputs.runs-on }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Assert fleet conventions
+        shell: bash
+        run: |
+          set -uo pipefail
+          findings=0
+          note() { echo "- $1" >> "$GITHUB_STEP_SUMMARY"; findings=$((findings+1)); }
+
+          echo '## Fleet check' >> "$GITHUB_STEP_SUMMARY"
+
+          if [ '${{ inputs.require-license }}' = 'true' ]; then
+            [ -f LICENSE ] || [ -f LICENSE.md ] || [ -f LICENSE.txt ] || note 'missing **LICENSE**'
+          fi
+          [ -f .editorconfig ]  || note 'missing **.editorconfig**'
+          [ -f .gitattributes ] || note 'missing **.gitattributes**'
+
+          if [ '${{ inputs.require-dependabot }}' = 'true' ]; then
+            [ -f .github/dependabot.yml ] || [ -f .github/dependabot.yaml ] \
+              || note 'missing **.github/dependabot.yml** - no automated dependency updates'
+          fi
+
+          if [ '${{ inputs.require-security-scan }}' = 'true' ]; then
+            if ! grep -rqls 'fleet-actions/.github/workflows/security-scan.yml' .github/workflows 2>/dev/null \
+               && [ ! -f .github/workflows/security-scan.yml ]; then
+              note 'no **security scan** workflow wired'
+            fi
+          fi
+
+          # runs-on drift: 43 fleet repos mixed '[self-hosted, linux]' and bare
+          # 'self-hosted' inside the SAME repo. Harmless individually, but it is the
+          # tell-tale of copy-paste and it makes runner-group changes miss files.
+          if [ -d .github/workflows ]; then
+            forms=$(grep -rhoE '^\s*runs-on:.*' .github/workflows 2>/dev/null \
+                    | sed -E 's/\s+#.*//; s/^\s*runs-on:\s*//' | sort -u | grep -c . || true)
+            [ "${forms:-0}" -gt 1 ] && note "**${forms} different \`runs-on\` forms** in one repo - normalise them"
+          fi
+
+          if [ "$findings" -eq 0 ]; then
+            echo 'All fleet conventions satisfied.' >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "_${findings} finding(s). Advisory unless the caller sets \`strict: true\`._" >> "$GITHUB_STEP_SUMMARY"
+          if [ '${{ inputs.strict }}' = 'true' ]; then
+            echo "::error::fleet-check: ${findings} finding(s)"; exit 1
+          fi
