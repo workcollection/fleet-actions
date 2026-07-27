@@ -70,12 +70,39 @@ jobs:
         uses: ./.github/actions/setup-buildx
       - run: docker buildx version
 
+      # ubuntu-latest ships PHP 8.3, so this exercises the PROBE fast path.
       - id: php
-        name: setup-php composite
+        name: setup-php composite (probe path)
         uses: ./.github/actions/setup-php
         with: { php-version: '8.3' }
-      - name: Assert php works and report which path was taken
+      - name: Assert probe path
         run: |
           php -v
           php -r 'exit(PHP_MAJOR_VERSION === 8 ? 0 : 1);'
-          echo "path taken: ${{ steps.php.outputs.path-taken }}"
+          test '${{ steps.php.outputs.path-taken }}' = 'preinstalled' \
+            || { echo "::error::expected the probe to hit, got '${{ steps.php.outputs.path-taken }}'"; exit 1; }
+
+  smoke-php-install:
+    # The probe path is the easy one. The INSTALL paths (apt-with-retry, then the
+    # upstream fallback) are the entire reason this action exists, and they are what
+    # runs on the ARC pods that ship no PHP. Ask for a version ubuntu-latest does not
+    # have so the probe MUST miss - otherwise the retry logic ships untested and its
+    # first real execution is on a runner nobody is watching.
+    name: Smoke - setup-php install path
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - id: php
+        uses: ./.github/actions/setup-php
+        with:
+          php-version: '8.2'
+          extensions: 'pdo, pdo_mysql, curl'
+      - name: Assert an install path ran and produced the requested version
+        run: |
+          test '${{ steps.php.outputs.path-taken }}' != 'preinstalled' \
+            || { echo "::error::probe unexpectedly hit - this case must exercise an install path"; exit 1; }
+          echo "install path taken: ${{ steps.php.outputs.path-taken }}"
+          php -v
+          php -r 'exit(PHP_MAJOR_VERSION === 8 && PHP_MINOR_VERSION === 2 ? 0 : 1);' \
+            || { echo "::error::wrong PHP version after install"; exit 1; }
+          php -m | grep -qi '^curl$' || { echo "::error::requested extension curl missing"; exit 1; }
