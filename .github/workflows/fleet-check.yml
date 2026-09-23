@@ -8,6 +8,12 @@
 # Advisory by default (`strict: false`) so adopting it cannot redden 60 repos at once.
 # Flip a repo to strict once it is clean.
 name: Fleet check
+#
+# FORK GUARD: when the CALLER's event is a pull request whose head lives in another
+# repository (a fork), every job below ignores `inputs.runs-on` and runs on
+# `ubuntu-latest`. A public consumer would otherwise let anyone execute their branch on a
+# fleet self-hosted runner just by opening a PR. GitHub-hosted runners are sandboxed and
+# disposable; ours are not. Same-repo PRs and non-PR events keep the requested runner.
 
 on:
   workflow_call:
@@ -40,7 +46,7 @@ permissions:
 jobs:
   check:
     name: Fleet hygiene
-    runs-on: ${{ inputs.runs-on }}
+    runs-on: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || inputs.runs-on }}
     steps:
       - uses: actions/checkout@v7
 
@@ -78,6 +84,26 @@ jobs:
             forms=$(grep -rhoE '^\s*runs-on:.*' .github/workflows 2>/dev/null \
                     | sed -E 's/\s+#.*//; s/^\s*runs-on:\s*//' | sort -u | grep -c . || true)
             [ "${forms:-0}" -gt 1 ] && note "**${forms} different \`runs-on\` forms** in one repo - normalise them"
+          fi
+
+          # Fork-PR exposure. `pull_request_target` runs the BASE workflow with a write
+          # token and, combined with a checkout of the PR head, hands fork code your
+          # secrets — never acceptable. `pull_request` + self-hosted on a PUBLIC repo is
+          # the second shape: fork code on a fleet runner (fleet-actions' own reusable
+          # workflows guard against it; a repo's own jobs do not).
+          if [ -d .github/workflows ]; then
+            if grep -rlsE '^\s*pull_request_target:' .github/workflows >/dev/null 2>&1; then
+              note "**\`pull_request_target\`** trigger present - runs with a write token; must not check out or execute PR code"
+            fi
+            if [ '${{ github.event.repository.visibility }}' = 'public' ]; then
+              for f in .github/workflows/*.yml .github/workflows/*.yaml; do
+                [ -f "$f" ] || continue
+                grep -qsE '^\s*pull_request:' "$f" || continue
+                grep -qsE '^\s*runs-on:.*self-hosted' "$f" || continue
+                grep -qs 'fleet-actions/.github/workflows/' "$f" && continue   # guarded upstream
+                note "**$f**: \`pull_request\` on a self-hosted runner in a PUBLIC repo - fork PRs would run on fleet hardware; use ubuntu-latest for PR builds or gate on \`github.event.pull_request.head.repo.full_name == github.repository\`"
+              done
+            fi
           fi
 
           if [ "$findings" -eq 0 ]; then

@@ -79,6 +79,32 @@ jobs:
       runs-on: self-hosted     # or ubuntu-latest where no self-hosted runner exists
 ```
 
+## Security model
+
+This repo is public and its workflows run on fleet self-hosted runners, so the
+threat is code from a fork reaching those runners.
+
+- **This repo's own CI** uses `pull_request` (never `pull_request_target`) on
+  `ubuntu-latest` with a read-only token. A fork PR here runs on GitHub's sandbox only.
+- **Fork guard in every reusable workflow.** If the caller's event is a pull request
+  whose head is another repository, the job ignores `runs-on` and runs on
+  `ubuntu-latest`. Same-repo PRs, pushes, schedules and dispatches keep the requested
+  runner. Consumers get this for free by calling the workflow.
+- **The Dependabot reaper refuses PR events.** It only makes sense on `schedule` /
+  `workflow_dispatch`, and it says so in code.
+- **Composite inputs never become shell source.** Inputs reach `run:` steps as
+  environment variables; a quote in an input cannot become a command.
+- **`fleet-check` flags exposure in consumers**: any `pull_request_target` trigger,
+  and `pull_request` + self-hosted in a public repo outside the guarded workflows.
+- **What consumers must still do:** never combine `pull_request_target` with a
+  checkout of the PR head; never run your *own* jobs for `pull_request` on
+  self-hosted runners in a public repo unless gated on
+  `github.event.pull_request.head.repo.full_name == github.repository`.
+- **Settings the org admin holds** (not in git): default workflow token
+  permissions read-only, fork-PR approval for all outside collaborators, protected
+  `main` and `v*` tags (a moved tag silently changes CI in every consumer), and
+  SHA pinning once the actions here are pinned.
+
 ## Migrating a repo
 
 **Reusable workflows rename the reported status check** to `<caller-job> / <called-job>`.

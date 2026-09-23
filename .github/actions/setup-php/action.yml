@@ -57,9 +57,13 @@ runs:
   steps:
     - id: probe
       shell: bash
+      env:
+        # Inputs reach the shell as variables, never as interpolated source: a quote in
+        # an input can then not become code.
+        WANT: ${{ inputs.php-version }}
       run: |
         set -uo pipefail
-        want='${{ inputs.php-version }}'
+        want="$WANT"
         if command -v php >/dev/null 2>&1; then
           have="$(php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;' 2>/dev/null || echo '')"
           if [ "$have" = "$want" ]; then
@@ -74,12 +78,16 @@ runs:
     - id: apt
       if: steps.probe.outputs.hit != 'true'
       shell: bash
+      env:
+        WANT: ${{ inputs.php-version }}
+        EXTS: ${{ inputs.extensions }}
       run: |
         # Bounded retry around the exact operation that flakes. Never fails the step:
         # a false `ok` just hands over to the upstream action below.
         set -uo pipefail
-        want='${{ inputs.php-version }}'
-        exts='${{ inputs.extensions }}'
+        want="$WANT"
+        exts="$EXTS"
+        case "$want" in *[!0-9.]*|'') echo "::error::php-version must look like 8.4, got '$want'"; exit 1 ;; esac
         echo "ok=false" >> "$GITHUB_OUTPUT"
 
         if ! command -v apt-get >/dev/null 2>&1; then

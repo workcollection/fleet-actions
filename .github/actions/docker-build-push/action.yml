@@ -59,13 +59,17 @@ runs:
   steps:
     - id: meta
       shell: bash
+      env:
+        IMG: ${{ inputs.image }}
+        REG: ${{ inputs.registry }}
+        TAGS: ${{ inputs.tags }}
       run: |
         set -uo pipefail
-        img='${{ inputs.image }}'
+        img="$IMG"
         [ -z "$img" ] && img="${GITHUB_REPOSITORY}"
         img="$(echo "$img" | tr '[:upper:]' '[:lower:]')"   # registries reject uppercase
-        reg='${{ inputs.registry }}'
-        tags='${{ inputs.tags }}'
+        reg="$REG"
+        tags="$TAGS"
         if [ -z "$tags" ]; then
           sha_tag="${reg}/${img}:sha-$(echo "$GITHUB_SHA" | cut -c1-12)"
           if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
