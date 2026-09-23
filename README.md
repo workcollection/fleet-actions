@@ -115,6 +115,24 @@ threat is code from a fork reaching those runners.
   `main` and `v*` tags (a moved tag silently changes CI in every consumer), and
   SHA pinning once the actions here are pinned.
 
+## Security policy + private vulnerability reporting
+
+`pvr-check.yml` (reusable) asserts the two operator-mandated conventions for public
+repos: **private vulnerability reporting enabled** and a **security policy present**
+(`SECURITY.md` in the repo, or the owner's default in `<owner>/.github`).
+Private repos report PVR as not applicable. Advisory unless `strict: true`.
+
+```yaml
+jobs:
+  pvr:
+    uses: workcollection/fleet-actions/.github/workflows/pvr-check.yml@v2
+    with: { runs-on: self-hosted }
+```
+
+`templates/SECURITY.md` is the fleet policy template. An organisation ships one
+copy in its `.github` repository and every repo inherits it; a user account has no
+such default, so each of its public repos carries the file.
+
 ## Migrating a repo
 
 **Reusable workflows rename the reported status check** to `<caller-job> / <called-job>`.

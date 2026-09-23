@@ -109,3 +109,11 @@ jobs:
           php -r 'exit(PHP_MAJOR_VERSION === 8 && PHP_MINOR_VERSION === 2 ? 0 : 1);' \
             || { echo "::error::wrong PHP version after install"; exit 1; }
           php -m | grep -qi '^curl$' || { echo "::error::requested extension curl missing"; exit 1; }
+
+  pvr-self:
+    # Dogfood: the same check every consumer will run, against this repo. Advisory,
+    # so a finding here (PVR still off, no SECURITY.md yet) reports without blocking.
+    name: pvr-check on this repo
+    uses: ./.github/workflows/pvr-check.yml
+    with:
+      runs-on: ubuntu-latest
