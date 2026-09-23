@@ -49,3 +49,15 @@ Read before changing a workflow here: a bad commit reaches every consumer.
 - Migration order for consumers: unprotected repos first — reusable workflows report
   checks as `<caller> / <called>`, and a protected repo's required-checks list must
   change in the same PR. See `docs/TAG-PLAN.md`.
+
+## Rolling out a NEW workflow file to consumers
+- A workflow that does not yet exist on the repository's default branch cannot be
+  `workflow_dispatch`ed on a PR branch — GitHub answers 404 for the dispatch. Only
+  workflows already on the default branch can be dispatched on other refs.
+- So a consumer stub for a new reusable workflow needs a `pull_request` trigger if the
+  rollout PR is to be gated on a real run of it; otherwise the PR shows no check and the
+  first run only happens after merge. The fork guard inside the reusable workflow keeps
+  the `pull_request` trigger safe for public repos.
+- Measured 2026-09-23 on the pvr-check rollout: six PRs held by the gate with "no jobs
+  ran" until the stub gained `pull_request`; after regenerating the branches all six ran
+  and merged within ~20 minutes.
