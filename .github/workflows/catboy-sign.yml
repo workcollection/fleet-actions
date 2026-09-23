@@ -171,17 +171,27 @@ jobs:
           if [ -n "${CATBOY_ROOT_B64:-}" ]; then echo "$CATBOY_ROOT_B64" | base64 -d > "$RUNNER_TEMP/root.crt"
           else curl -sS -m 20 --fail "${CATBOY_PKI_BASE:-http://pki.catboy.systems}/certs/r1.crt" -o "$RUNNER_TEMP/root.crt"; fi
           openssl verify -CAfile "$RUNNER_TEMP/root.crt" -untrusted "$RUNNER_TEMP/chain.pem" "$RUNNER_TEMP/sign.crt" >/dev/null
-          # CRLs of every level for the verify step: fetch each chain cert's CDP (missing ones
-          # are only a notice here; the verify step then relies on osslsigncode's own CDP fetch)
-          : > "$RUNNER_TEMP/crls.pem"
+          # HARD GATE (catboy-pki G-CRL): every CRL a verifier will fetch must already be published.
+          # Fetch each chain cert's CDP plus the TSA chain (T1 cert + CRL) and STOP with a named
+          # reason if any is missing — osslsigncode hard-fails on an unreachable CDP, and a signed
+          # artifact whose CRL is missing would fail verification everywhere.
+          : > "$RUNNER_TEMP/crls.pem"; missing=""
           csplit -s -z -f "$RUNNER_TEMP/c-" "$RUNNER_TEMP/chain.pem" '/BEGIN CERTIFICATE/' '{*}' || true
           for f in "$RUNNER_TEMP"/sign.crt "$RUNNER_TEMP"/c-*; do
-            openssl x509 -in "$f" -noout -ext crlDistributionPoints 2>/dev/null | grep -o 'URI:[^ ,]*' | cut -c5-
-          done | sort -u | while read -r url; do
-            if curl -sS -m 15 --fail "$url" -o "$RUNNER_TEMP/one.crl" 2>/dev/null; then
-              { openssl crl -in "$RUNNER_TEMP/one.crl" -inform DER -outform PEM 2>/dev/null || openssl crl -in "$RUNNER_TEMP/one.crl" -outform PEM; } >> "$RUNNER_TEMP/crls.pem"
-            else echo "::notice::CRL not fetched: $url"; fi
+            subj=$(openssl x509 -in "$f" -noout -subject | sed 's/^subject=//')
+            urls=$(openssl x509 -in "$f" -noout -ext crlDistributionPoints 2>/dev/null | grep -o 'URI:[^ ,]*' | cut -c5-)
+            for url in $urls; do
+              if curl -sS -m 15 --fail "$url" -o "$RUNNER_TEMP/one.crl" 2>/dev/null \
+                 && { openssl crl -in "$RUNNER_TEMP/one.crl" -inform DER -outform PEM 2>/dev/null || openssl crl -in "$RUNNER_TEMP/one.crl" -outform PEM 2>/dev/null; } >> "$RUNNER_TEMP/crls.pem"; then :
+              else missing="$missing [$subj] $url"; fi
+            done
           done
+          PKI=${CATBOY_PKI_BASE:-http://pki.catboy.systems}
+          if [ -n "${CATBOY_TSA_URL:-}" ]; then
+            curl -sS -m 15 --fail "$PKI/certs/t1.crt" -o "$RUNNER_TEMP/t1.crt" 2>/dev/null || missing="$missing [T1 cert] $PKI/certs/t1.crt"
+            curl -sS -m 15 --fail "$PKI/crl/t1.crl"  -o "$RUNNER_TEMP/t1.crl" 2>/dev/null || missing="$missing [T1 CRL] $PKI/crl/t1.crl"
+          fi
+          if [ -n "$missing" ]; then echo "reason=CRL not published for:$missing" >> "$GITHUB_OUTPUT"; echo "::error::CRL not published for:$missing"; exit 1; fi
           # mirror the leaf into CatCMDB so revocation-by-run is a lookup, not an enumeration
           if [ -n "${CATCMDB_URL:-}" ] && [ -n "${CATCMDB_TOKEN:-}" ]; then
             jq -n --arg cert "$(cat "$RUNNER_TEMP/sign.crt")" --arg chain "$(cat "$RUNNER_TEMP/chain.pem")" --arg issuer "$ISSUER" \
@@ -202,13 +212,15 @@ jobs:
           fail=0; signed=0; removed=0
           TS=(); [ -n "${CATBOY_TSA_URL:-}" ] && TS=(-ts "$CATBOY_TSA_URL") || echo "::warning::CATBOY_TSA_URL unset — signatures carry no timestamp and expire with the 1-hour leaf"
           CRL=(); [ -s "$RUNNER_TEMP/crls.pem" ] && CRL=(-CRLfile "$RUNNER_TEMP/crls.pem")
+          TSAV=(); [ -s "$RUNNER_TEMP/t1.crt" ] && TSAV=(-TSA-CAfile "$RUNNER_TEMP/t1.crt" -TSA-CRLfile "$RUNNER_TEMP/t1.crl")
+          v=$(osslsigncode --version 2>&1 | grep -oE '[0-9]+\.[0-9]+' | head -1); [ "$(printf '%s\n2.13\n' "$v" | sort -V | head -1)" = "2.13" ] || echo "::warning::osslsigncode $v < 2.13 on this runner (memory-safety fixes); the runner image should carry >= 2.13"
           cat "$RUNNER_TEMP/sign.crt" "$RUNNER_TEMP/chain.pem" > "$RUNNER_TEMP/signchain.pem"
           { echo "# Signatures"; echo; echo "Signed by catboy.systems PKI for \`$GITHUB_REPOSITORY\` run $GITHUB_RUN_ID (leaf serial ${{ steps.cert.outputs.serial }})."; echo; echo '| file | sha256 | signature |'; echo '|---|---|---|'; } > dist/SIGNATURES.md
           # shellcheck disable=SC2086
           find_args() { local first=1; for p in $1; do [ $first = 1 ] || printf ' -o'; printf ' -name %q' "$p"; first=0; done; }
           while IFS= read -r -d '' f; do
             if osslsigncode sign -certs "$RUNNER_TEMP/signchain.pem" -key "$RUNNER_TEMP/sign.key" -h sha256 -n "$GITHUB_REPOSITORY" "${TS[@]}" -in "$f" -out "$f.signed" >/dev/null 2>&1 && mv "$f.signed" "$f"; then
-              if osslsigncode verify -CAfile "$RUNNER_TEMP/root.crt" "${CRL[@]}" -in "$f" >/dev/null 2>&1; then
+              if osslsigncode verify -CAfile "$RUNNER_TEMP/root.crt" "${CRL[@]}" "${TSAV[@]}" -in "$f" >/dev/null 2>&1; then
                 signed=$((signed+1)); echo "| \`${f#dist/}\` | $(sha256sum "$f" | cut -c1-64) | Authenticode |" >> dist/SIGNATURES.md
               else
                 osslsigncode remove-signature -in "$f" -out "$f.u" >/dev/null 2>&1 && mv "$f.u" "$f"; removed=$((removed+1)); echo "::warning::unverifiable signature removed: $f"
@@ -259,7 +271,7 @@ jobs:
           gate='${{ steps.gate0.outputs.gate }}'; reason='${{ steps.gate0.outputs.reason }}'
           if [ -z "$gate" ]; then
             if [ '${{ steps.login.outcome }}' != 'success' ]; then gate=1; reason='OpenBao login failed'
-            elif [ '${{ steps.cert.outcome }}' != 'success' ]; then gate=2; reason='run certificate not issued'
+            elif [ '${{ steps.cert.outcome }}' != 'success' ]; then gate=2; reason='${{ steps.cert.outputs.reason }}'; reason=${reason:-'run certificate not issued'}
             elif [ '${{ steps.sign.outcome }}' != 'success' ]; then gate='${{ steps.sign.outputs.gate }}'; gate=${gate:-3}; reason="signing failed (signed/failed/removed: ${{ steps.sign.outputs.counts }})"
             fi
           fi

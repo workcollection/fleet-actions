@@ -117,3 +117,41 @@ jobs:
     uses: ./.github/workflows/pvr-check.yml
     with:
       runs-on: ubuntu-latest
+
+  # catboy-sign fail-open proof, measured on ubuntu-latest (no CA there by design):
+  #   gate 0 — artifact present, no CATBOY_BAO_ADDR → job green, signed=false, gate=0, artifact re-uploaded
+  #   gate 5 — artifact name that does not exist → job green, signed=false, gate=5
+  sign-fixture:
+    name: catboy-sign fixture
+    runs-on: ubuntu-latest
+    steps:
+      - run: mkdir -p dist && printf 'not a PE, just a fixture\n' > dist/fixture.txt && echo fixture > dist/fixture.zip
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with: { name: catboy-sign-fixture, path: dist, retention-days: 1 }
+  sign-gate0:
+    name: catboy-sign gate 0 (no CA)
+    needs: sign-fixture
+    uses: ./.github/workflows/catboy-sign.yml
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    with: { artifact-name: catboy-sign-fixture, runs-on: ubuntu-latest, attest: false }
+  sign-gate5:
+    name: catboy-sign gate 5 (no artifact)
+    uses: ./.github/workflows/catboy-sign.yml
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    with: { artifact-name: does-not-exist, runs-on: ubuntu-latest, attest: false }
+  sign-assert:
+    name: catboy-sign outputs
+    needs: [sign-gate0, sign-gate5]
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo "gate0: signed=${{ needs.sign-gate0.outputs.signed }} gate=${{ needs.sign-gate0.outputs.gate }} artifact=${{ needs.sign-gate0.outputs.artifact }}"
+          echo "gate5: signed=${{ needs.sign-gate5.outputs.signed }} gate=${{ needs.sign-gate5.outputs.gate }}"
+          [ "${{ needs.sign-gate0.outputs.signed }}" = false ] && [ "${{ needs.sign-gate0.outputs.gate }}" = 0 ] && [ "${{ needs.sign-gate0.outputs.artifact }}" = catboy-sign-fixture-signed ]
+          [ "${{ needs.sign-gate5.outputs.signed }}" = false ] && [ "${{ needs.sign-gate5.outputs.gate }}" = 5 ]
