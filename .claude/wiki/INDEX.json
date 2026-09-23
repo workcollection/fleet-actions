@@ -10,5 +10,17 @@
     ],
     "summary": "Fork guard rationale, self-hosted runner limits, API facts behind pvr-check, the stacked-PR trap, release verification",
     "updated": "2026-09-23"
+  },
+  "rollout-v2-wave1": {
+    "title": "Rollout v2.0.0 \u2014 wave 1 (2026-09-23)",
+    "tags": [
+      "rollout",
+      "migration",
+      "ci",
+      "runners",
+      "gotchas"
+    ],
+    "summary": "Gate on real check runs; the silently disabled workflow; runner-infra red causes; user-account repos with no live runner; wave sizing",
+    "updated": "2026-09-23"
   }
 }
