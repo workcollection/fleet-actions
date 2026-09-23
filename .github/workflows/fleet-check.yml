@@ -8,6 +8,12 @@
 # Advisory by default (`strict: false`) so adopting it cannot redden 60 repos at once.
 # Flip a repo to strict once it is clean.
 name: Fleet check
+#
+# FORK GUARD: when the CALLER's event is a pull request whose head lives in another
+# repository (a fork), every job below ignores `inputs.runs-on` and runs on
+# `ubuntu-latest`. A public consumer would otherwise let anyone execute their branch on a
+# fleet self-hosted runner just by opening a PR. GitHub-hosted runners are sandboxed and
+# disposable; ours are not. Same-repo PRs and non-PR events keep the requested runner.
 
 on:
   workflow_call:
@@ -40,7 +46,7 @@ permissions:
 jobs:
   check:
     name: Fleet hygiene
-    runs-on: ${{ inputs.runs-on }}
+    runs-on: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || inputs.runs-on }}
     steps:
       - uses: actions/checkout@v7
 
@@ -78,6 +84,56 @@ jobs:
             forms=$(grep -rhoE '^\s*runs-on:.*' .github/workflows 2>/dev/null \
                     | sed -E 's/\s+#.*//; s/^\s*runs-on:\s*//' | sort -u | grep -c . || true)
             [ "${forms:-0}" -gt 1 ] && note "**${forms} different \`runs-on\` forms** in one repo - normalise them"
+          fi
+
+          # Fork-PR exposure, evaluated PER JOB from parsed YAML (not grep): every
+          # trigger form (`on: pull_request_target`, `on: [..]`, block form) and every
+          # runs-on form (string, list, expression) is seen; a workflow that mixes a
+          # guarded fleet call with its own self-hosted PR job is still caught, and the
+          # standard shape (PR jobs on ubuntu-latest + a main-gated self-hosted deploy)
+          # is not flagged. `github.event.repository.private` (never `visibility`,
+          # which can be absent and would fail open) decides "public".
+          if [ -d .github/workflows ]; then
+            python3 -c 'import yaml' 2>/dev/null || python3 -m pip install --quiet --user pyyaml >/dev/null 2>&1 || true
+            IS_PUBLIC='${{ github.event.repository.private == false }}' \
+            python3 - <<'PY' > /tmp/fleet-exposure.txt || echo "- fork-exposure check could not run (python3/pyyaml missing) - treat as UNVERIFIED"
+          import glob, os, re, sys
+          try:
+              import yaml
+          except ImportError:
+              sys.exit(1)
+          public = os.environ.get("IS_PUBLIC") == "true"
+          def events(on):
+              if isinstance(on, str): return {on}
+              if isinstance(on, list): return {str(x) for x in on}
+              if isinstance(on, dict): return set(on.keys())
+              return set()
+          def runs_on_text(v):
+              if isinstance(v, list): return " ".join(map(str, v))
+              if isinstance(v, dict): return " ".join(map(str, v.values()))
+              return str(v or "")
+          for f in sorted(glob.glob(".github/workflows/*.y*ml")):
+              try:
+                  wf = yaml.safe_load(open(f)) or {}
+              except Exception as e:
+                  print(f"- **{f}**: not parseable ({e.__class__.__name__}) - fix it, the exposure check cannot read it"); continue
+              ev = events(wf.get("on") or wf.get(True))   # PyYAML reads a bare `on:` key as boolean True
+              if "pull_request_target" in ev:
+                  print(f"- **{f}**: `pull_request_target` trigger - runs with a write token; must not check out or execute PR code")
+              if "pull_request" not in ev or not public:
+                  continue
+              for name, job in (wf.get("jobs") or {}).items():
+                  if not isinstance(job, dict): continue
+                  if isinstance(job.get("uses"), str) and "fleet-actions/.github/workflows/" in job["uses"]:
+                      continue   # guarded upstream (fork guard inside the reusable workflow)
+                  ro = runs_on_text(job.get("runs-on"))
+                  if "self-hosted" not in ro: continue
+                  cond = str(job.get("if") or "")
+                  if "head.repo" in cond or "pull_request" in cond or "event_name" in cond:
+                      continue   # explicitly gated (same-repo check or event gate)
+                  print(f"- **{f}** job `{name}`: `pull_request` on a self-hosted runner in a PUBLIC repo with no gate - fork PRs would run on fleet hardware; use ubuntu-latest for PR builds or add `if: github.event.pull_request.head.repo.full_name == github.repository`")
+          PY
+            while IFS= read -r line; do [ -n "$line" ] && note "${line#- }"; done < /tmp/fleet-exposure.txt
           fi
 
           if [ "$findings" -eq 0 ]; then

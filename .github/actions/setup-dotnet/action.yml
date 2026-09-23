@@ -24,10 +24,12 @@ runs:
     - name: Point the SDK install at a writable dir
       if: inputs.install-dir != ''
       shell: bash
+      env:
+        INSTALL_DIR: ${{ inputs.install-dir }}
       run: |
         # Must precede setup-dotnet: the action reads this at install time. Self-hosted
         # runners have no writable /usr/share/dotnet, so the default location fails.
-        echo "DOTNET_INSTALL_DIR=${{ inputs.install-dir }}" >> "$GITHUB_ENV"
+        echo "DOTNET_INSTALL_DIR=${INSTALL_DIR}" >> "$GITHUB_ENV"
 
     - uses: actions/setup-dotnet@v6
       with:

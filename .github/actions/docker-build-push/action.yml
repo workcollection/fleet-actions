@@ -59,13 +59,17 @@ runs:
   steps:
     - id: meta
       shell: bash
+      env:
+        IMG: ${{ inputs.image }}
+        REG: ${{ inputs.registry }}
+        TAGS: ${{ inputs.tags }}
       run: |
         set -uo pipefail
-        img='${{ inputs.image }}'
+        img="$IMG"
         [ -z "$img" ] && img="${GITHUB_REPOSITORY}"
         img="$(echo "$img" | tr '[:upper:]' '[:lower:]')"   # registries reject uppercase
-        reg='${{ inputs.registry }}'
-        tags='${{ inputs.tags }}'
+        reg="$REG"
+        tags="$TAGS"
         if [ -z "$tags" ]; then
           sha_tag="${reg}/${img}:sha-$(echo "$GITHUB_SHA" | cut -c1-12)"
           if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
@@ -75,10 +79,13 @@ runs:
             tags="${reg}/${img}:${safe}"$'\n'"${sha_tag}"
           fi
         fi
+        # Random delimiter: `tags` is caller-controlled and a literal __EOT__ line would
+        # truncate the output or abort the step.
+        d="EOT_$(head -c 12 /dev/urandom | od -An -tx1 | tr -d ' \n')"
         {
-          echo 'tags<<__EOT__'
+          echo "tags<<${d}"
           echo "$tags"
-          echo '__EOT__'
+          echo "${d}"
         } >> "$GITHUB_OUTPUT"
         echo "primary=$(echo "$tags" | head -1)" >> "$GITHUB_OUTPUT"
         # Scope the cache per ref so a feature branch cannot evict main's entry.
