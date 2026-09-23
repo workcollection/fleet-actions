@@ -28,12 +28,16 @@ here holds secrets — that is exactly how every third-party action already work
 ## Consume by tag, never by branch
 
 ```yaml
-uses: workcollection/fleet-actions/.github/actions/setup-php@v1   # yes
+uses: workcollection/fleet-actions/.github/actions/setup-php@v2.0.0   # yes
 uses: workcollection/fleet-actions/.github/actions/setup-php@main # no
 ```
 
-One bad commit on `main` would otherwise break CI in ~65 repos simultaneously. `v1` is a
-moving tag that only advances after this repo's own CI passes.
+One bad commit on `main` would otherwise break CI in ~65 repos simultaneously. Release
+tags are **exact and immutable** (`v2.0.0`, enforced by a repository ruleset: no delete,
+no move). There is no moving `v2` alias — a tag that can move is a tag that can change
+CI in every consumer at once. Consumers pin the exact tag and let Dependabot's
+`github-actions` ecosystem raise the bump PR when a new release exists; fixes still
+propagate, one reviewable PR per repo. (`v1` predates the ruleset and stays where it is.)
 
 ## Composite actions
 
@@ -74,7 +78,7 @@ build, where `php: command not found` reads like the repo's own bug.
 ```yaml
 jobs:
   security:
-    uses: workcollection/fleet-actions/.github/workflows/security-scan.yml@v1
+    uses: workcollection/fleet-actions/.github/workflows/security-scan.yml@v2.0.0
     with:
       runs-on: self-hosted     # or ubuntu-latest where no self-hosted runner exists
 ```
@@ -125,7 +129,7 @@ Private repos report PVR as not applicable. Advisory unless `strict: true`.
 ```yaml
 jobs:
   pvr:
-    uses: workcollection/fleet-actions/.github/workflows/pvr-check.yml@v2
+    uses: workcollection/fleet-actions/.github/workflows/pvr-check.yml@v2.0.0
     with: { runs-on: self-hosted }
 ```
 

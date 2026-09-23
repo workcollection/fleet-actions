@@ -1,17 +1,43 @@
 # Tag plan and migration notes
 
-Consumers reference this repo **by tag only** (`@v1`, `@v2`), never `@main`: one bad
-commit on `main` would otherwise change CI in every fleet repo at once. Release tags
-`v*` are immutable (repository ruleset: no delete, no update, no force-move), so a tag
-is a promise, not a pointer.
+Consumers reference this repo **by exact release tag** (`@v2.0.0`), never `@main` and
+never a bare major: one bad commit on `main` would otherwise change CI in every fleet
+repo at once. Release tags `v*` are immutable (repository ruleset: no delete, no
+update, no force-move), so a tag is a promise, not a pointer.
+
+## Why exact tags (decision 2026-09-23, orchestrator judgement, on record)
+
+A moving major alias (`v2` advancing to each `v2.x.y`) and an immutable-tag rule are
+mutually exclusive by construction: you cannot have "fixes propagate silently" and
+"nothing can change CI in N repos at once" at the same time. The fleet chose the
+second the moment the 2026-09 audit found that anyone with write access could move
+`v1` and thereby rewrite CI in every consumer.
+
+Rejected options:
+- **Moving major alias, ruleset exempts `v[0-9]`** — restores the hole in a smaller
+  shape: "only tag-pushers can rewrite CI everywhere" is still fleet-wide remote code
+  execution by one push, the exact failure the ruleset exists to stop.
+- **`@main`** — the same, for everyone with write access, with no review at all.
+
+Why propagation still works with exact tags (measured, not hoped): Dependabot's
+`github-actions` ecosystem bumps both action references and reusable-workflow
+references, so a `v2.0.1` reaches every consumer as a reviewable PR per repo —
+slower, visible, revertible. That is the right trade for CI that runs on fleet
+runners.
+
+Self-references inside the reusable workflows (`…/.github/actions/x@…`) are pinned to
+the **commit SHA** that carries the final composites, not to a tag: a tag cannot verify
+a commit that references that tag (the tag does not exist when the commit is verified).
+The release checklist bumps them after the composites change.
 
 ## v1 (2026-08) — current
 
 Composite actions `setup-php`, `setup-python`, `setup-go`, `setup-dotnet`,
 `setup-buildx`, `docker-build-push`; reusable workflows `security-scan.yml`,
-`dependabot-auto-merge.yml`, `fleet-check.yml`. Consumed by tag `v1`.
+`dependabot-auto-merge.yml`, `fleet-check.yml`. Consumed by tag `v1` (created before
+the immutable-tag ruleset; it stays where it is).
 
-## v2 (2026-09) — what changes
+## v2.0.0 (2026-09) — what changes
 
 | Area | v1 | v2 |
 |---|---|---|
@@ -27,7 +53,7 @@ Composite actions `setup-php`, `setup-python`, `setup-go`, `setup-dotnet`,
 | Reserved | — | **`catboy-sign.yml`** (see below) |
 
 Nothing in v2 changes an existing input name or default. A v1 caller stub works
-unchanged after `@v1` → `@v2`; the two behaviour changes that can surface are the
+unchanged after `@v1` → `@v2.0.0`; the two behaviour changes that can surface are the
 fork guard (fork PRs now run on `ubuntu-latest`) and the reaper refusing PR events
 (a caller wired to `pull_request` turns red on purpose).
 
@@ -38,7 +64,7 @@ in **this** repository, so every release workflow in the fleet can call one line
 
 ```yaml
 sign:
-  uses: workcollection/fleet-actions/.github/workflows/catboy-sign.yml@v2   # reserved, lands in a v2.x minor
+  uses: workcollection/fleet-actions/.github/workflows/catboy-sign.yml@v2.1.0   # reserved, lands in a v2.x minor
 ```
 
 Contract reserved for it, from the PKI plan (§6.7): `workflow_call`; `permissions:
@@ -60,7 +86,7 @@ project delivers it; no consumer changes, callers opt in by adding the job. The 
    repo migrating from a copy-pasted workflow to the reusable one sees new names.
    Migrate the repos without required checks, then handle protected repos one at a
    time: update the required-checks list in the same PR as the stub change.
-2. Change `@v1` → `@v2` in the stubs (four files at most: `ci.yml`,
+2. Change `@v1` → `@v2.0.0` in the stubs (four files at most: `ci.yml`,
    `security-scan.yml`, `dependabot-auto-merge.yml`, `fleet-check.yml`).
 3. If the repo is public, add a `pvr-check` stub and drop `templates/SECURITY.md` in
    (user-account repos) or rely on the org default (`smol-kitten/.github`).
@@ -75,6 +101,6 @@ project delivers it; no consumer changes, callers opt in by adding the job. The 
   consumer repo pointing its stubs at the release candidate SHA (all four workflows
   green on `self-hosted`, scanner artifacts present). v2 was verified this way on
   `smol-kitten/cat-guard` before tagging.
-- Self-references inside the reusable workflows (`workcollection/fleet-actions/.github/actions/…@vN`)
-  are bumped to the new tag in the release commit — a `@v2` workflow must not pull
-  `@v1` composites.
+- Self-references inside the reusable workflows point at the commit SHA carrying the
+  final composites (see "Why exact tags"); the release commit re-pins them when the
+  composites changed.
