@@ -1,0 +1,109 @@
+# Private-vulnerability-reporting + security-policy check, as a reusable workflow.
+#
+# Asserts two fleet conventions the operator decided for every public repo:
+#   1. GitHub private vulnerability reporting (PVR) is ENABLED — so a reporter has a
+#      private channel instead of a public issue.
+#   2. A security policy exists — SECURITY.md in the repo (root, .github/, docs/) or
+#      the owner's default one in <owner>/.github.
+#
+# Measured while writing this (2026-09-23): GET /repos/{r}/private-vulnerability-
+# reporting answers {"enabled":bool} for PUBLIC repos, even unauthenticated, and 404
+# for private repos (the feature does not exist there — reported as n/a, not a
+# finding). The community-profile API does NOT surface an org default SECURITY.md,
+# so the owner's .github repo is read directly. Enabling PVR needs repo admin and is
+# NOT done here (PUT /repos/{r}/private-vulnerability-reporting); the summary prints
+# the command.
+#
+# Advisory by default (`strict: false`), like fleet-check. No secrets: GITHUB_TOKEN
+# with contents:read is enough for every read above.
+name: PVR check (fleet)
+
+on:
+  workflow_call:
+    inputs:
+      runs-on:
+        type: string
+        required: false
+        default: 'self-hosted'
+      strict:
+        description: 'Fail the job on findings instead of only reporting them.'
+        type: boolean
+        required: false
+        default: false
+      require-security-md:
+        description: 'Also require a security policy (repo SECURITY.md or the owner default).'
+        type: boolean
+        required: false
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  pvr:
+    name: PVR + security policy
+    # Fork guard, same as every fleet reusable workflow.
+    runs-on: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || inputs.runs-on }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { fetch-depth: 1 }
+      - name: Check private vulnerability reporting + security policy
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          API: ${{ github.api_url }}
+          REPO: ${{ github.repository }}
+          OWNER: ${{ github.repository_owner }}
+          IS_PRIVATE: ${{ github.event.repository.private }}
+          STRICT: ${{ inputs.strict }}
+          REQUIRE_MD: ${{ inputs.require-security-md }}
+        run: |
+          set -uo pipefail
+          findings=0
+          note() { echo "- $1" >> "$GITHUB_STEP_SUMMARY"; findings=$((findings+1)); }
+          ok()   { echo "- $1" >> "$GITHUB_STEP_SUMMARY"; }
+          api()  { curl -sS -m 20 -H "Authorization: Bearer ${GH_TOKEN}" -H 'Accept: application/vnd.github+json' -o "$2" -w '%{http_code}' "${API}/$1" 2>/dev/null || echo 000; }
+          echo '## PVR check' >> "$GITHUB_STEP_SUMMARY"
+
+          # 1. private vulnerability reporting (public repos only)
+          if [ "${IS_PRIVATE}" = "true" ]; then
+            ok 'private repository - private vulnerability reporting is not applicable'
+          else
+            code="$(api "repos/${REPO}/private-vulnerability-reporting" /tmp/pvr.json)"
+            case "$code" in
+              200)
+                if grep -q '"enabled": *true' /tmp/pvr.json; then
+                  ok 'private vulnerability reporting **enabled**'
+                else
+                  note "private vulnerability reporting **DISABLED** - a repo admin enables it with: \`gh api -X PUT repos/${REPO}/private-vulnerability-reporting\` (or Settings → Security → Private vulnerability reporting)"
+                fi ;;
+              404) ok 'private vulnerability reporting endpoint 404 - repository is not public or the feature is unavailable' ;;
+              *)   note "could not read private vulnerability reporting state (HTTP ${code}) - treat as UNVERIFIED" ;;
+            esac
+          fi
+
+          # 2. security policy: repo file, else the owner's default in <owner>/.github
+          if [ "${REQUIRE_MD}" = "true" ]; then
+            found=''
+            for f in SECURITY.md .github/SECURITY.md docs/SECURITY.md; do
+              [ -f "$f" ] && { found="$f"; break; }
+            done
+            if [ -z "$found" ]; then
+              code="$(api "repos/${OWNER}/.github/contents/SECURITY.md" /tmp/secmd.json)"
+              [ "$code" = "200" ] && found="${OWNER}/.github/SECURITY.md (owner default)"
+            fi
+            if [ -n "$found" ]; then
+              ok "security policy: **${found}**"
+            else
+              note "no **SECURITY.md** in the repo (root, .github/, docs/) and no owner default in \`<owner>/.github\` - copy \`templates/SECURITY.md\` from fleet-actions"
+            fi
+          fi
+
+          if [ "$findings" -eq 0 ]; then
+            echo 'All checks satisfied.' >> "$GITHUB_STEP_SUMMARY"; exit 0
+          fi
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "_${findings} finding(s). Advisory unless the caller sets \`strict: true\`._" >> "$GITHUB_STEP_SUMMARY"
+          if [ "${STRICT}" = "true" ]; then
+            echo "::error::pvr-check: ${findings} finding(s)"; exit 1
+          fi
