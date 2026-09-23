@@ -1,0 +1,14 @@
+{
+  "lessons": {
+    "title": "Lessons (2026-09 update pass)",
+    "tags": [
+      "ci",
+      "security",
+      "runners",
+      "release",
+      "gotchas"
+    ],
+    "summary": "Fork guard rationale, self-hosted runner limits, API facts behind pvr-check, the stacked-PR trap, release verification",
+    "updated": "2026-09-23"
+  }
+}
