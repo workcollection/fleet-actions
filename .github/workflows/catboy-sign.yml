@@ -98,18 +98,21 @@ jobs:
       - id: gate0
         name: Gate 0 — is a CA configured on this runner?
         shell: bash
+        env:   # expressions never go into shell source: every value arrives as an environment variable
+          FETCH_OUTCOME: ${{ steps.fetch.outcome }}
+          ARTIFACT_NAME: ${{ inputs.artifact-name }}
         run: |
           set -uo pipefail
-          if [ '${{ steps.fetch.outcome }}' != 'success' ] || [ ! -d dist ]; then
-            echo "gate=5" >> "$GITHUB_OUTPUT"; echo "reason=build artifact '${{ inputs.artifact-name }}' not available" >> "$GITHUB_OUTPUT"; exit 0
+          if [ "$FETCH_OUTCOME" != 'success' ] || [ ! -d dist ]; then
+            echo "gate=5" >> "$GITHUB_OUTPUT"; echo "reason=build artifact $ARTIFACT_NAME not available" >> "$GITHUB_OUTPUT"; exit 0
           fi
           if [ -z "${CATBOY_BAO_ADDR:-}" ] || [ -z "${CATBOY_RUNNER_ISSUER:-}" ]; then
-            echo "gate=0" >> "$GITHUB_OUTPUT"; echo "reason=no CA configured on runner '${RUNNER_NAME:-?}'" >> "$GITHUB_OUTPUT"; exit 0
+            echo "gate=0" >> "$GITHUB_OUTPUT"; echo "reason=no CA configured on runner ${RUNNER_NAME:-?}" >> "$GITHUB_OUTPUT"; exit 0
           fi
           for t in curl jq openssl; do command -v "$t" >/dev/null || { echo "gate=3" >> "$GITHUB_OUTPUT"; echo "reason=missing tool $t" >> "$GITHUB_OUTPUT"; exit 0; }; done
           if ! command -v osslsigncode >/dev/null; then
             (sudo -n apt-get install -y -qq osslsigncode >/dev/null 2>&1 || apt-get install -y -qq osslsigncode >/dev/null 2>&1) || true
-            command -v osslsigncode >/dev/null || { echo "gate=3" >> "$GITHUB_OUTPUT"; echo "reason=osslsigncode not installed on runner '${RUNNER_NAME:-?}'" >> "$GITHUB_OUTPUT"; exit 0; }
+            command -v osslsigncode >/dev/null || { echo "gate=3" >> "$GITHUB_OUTPUT"; echo "reason=osslsigncode not installed on runner ${RUNNER_NAME:-?}" >> "$GITHUB_OUTPUT"; exit 0; }
           fi
           echo "gate=" >> "$GITHUB_OUTPUT"; echo "reason=" >> "$GITHUB_OUTPUT"
 
@@ -207,6 +210,10 @@ jobs:
         if: steps.gate0.outputs.gate == '' && steps.cert.outcome == 'success'
         continue-on-error: true
         shell: bash
+        env:
+          LEAF_SERIAL: ${{ steps.cert.outputs.serial }}
+          PE_GLOB: ${{ inputs.pe-glob }}
+          ARCHIVE_GLOB: ${{ inputs.archive-glob }}
         run: |
           set -uo pipefail
           fail=0; signed=0; removed=0
@@ -215,7 +222,7 @@ jobs:
           TSAV=(); [ -s "$RUNNER_TEMP/t1.crt" ] && TSAV=(-TSA-CAfile "$RUNNER_TEMP/t1.crt" -TSA-CRLfile "$RUNNER_TEMP/t1.crl")
           v=$(osslsigncode --version 2>&1 | grep -oE '[0-9]+\.[0-9]+' | head -1); [ "$(printf '%s\n2.13\n' "$v" | sort -V | head -1)" = "2.13" ] || echo "::warning::osslsigncode $v < 2.13 on this runner (memory-safety fixes); the runner image should carry >= 2.13"
           cat "$RUNNER_TEMP/sign.crt" "$RUNNER_TEMP/chain.pem" > "$RUNNER_TEMP/signchain.pem"
-          { echo "# Signatures"; echo; echo "Signed by catboy.systems PKI for \`$GITHUB_REPOSITORY\` run $GITHUB_RUN_ID (leaf serial ${{ steps.cert.outputs.serial }})."; echo; echo '| file | sha256 | signature |'; echo '|---|---|---|'; } > dist/SIGNATURES.md
+          { echo "# Signatures"; echo; echo "Signed by catboy.systems PKI for \`$GITHUB_REPOSITORY\` run $GITHUB_RUN_ID (leaf serial $LEAF_SERIAL)."; echo; echo '| file | sha256 | signature |'; echo '|---|---|---|'; } > dist/SIGNATURES.md
           # shellcheck disable=SC2086
           find_args() { local first=1; for p in $1; do [ $first = 1 ] || printf ' -o'; printf ' -name %q' "$p"; first=0; done; }
           while IFS= read -r -d '' f; do
@@ -226,13 +233,13 @@ jobs:
                 osslsigncode remove-signature -in "$f" -out "$f.u" >/dev/null 2>&1 && mv "$f.u" "$f"; removed=$((removed+1)); echo "::warning::unverifiable signature removed: $f"
               fi
             else rm -f "$f.signed"; fail=$((fail+1)); echo "::warning::sign failed: $f"; fi
-          done < <(eval find dist -type f \\\( "$(find_args '${{ inputs.pe-glob }}')" \\\) -print0)
+          done < <(eval find dist -type f \\\( "$(find_args "$PE_GLOB")" \\\) -print0)
           while IFS= read -r -d '' f; do
             if openssl cms -sign -binary -in "$f" -signer "$RUNNER_TEMP/sign.crt" -inkey "$RUNNER_TEMP/sign.key" -certfile "$RUNNER_TEMP/chain.pem" -outform DER -out "$f.p7s" 2>/dev/null \
                && openssl cms -verify -binary -content "$f" -in "$f.p7s" -inform DER -CAfile "$RUNNER_TEMP/root.crt" -purpose any -out /dev/null 2>/dev/null; then
               signed=$((signed+1)); echo "| \`${f#dist/}\` | $(sha256sum "$f" | cut -c1-64) | CMS detached \`${f##*/}.p7s\` |" >> dist/SIGNATURES.md
             else rm -f "$f.p7s"; fail=$((fail+1)); echo "::warning::CMS sign/verify failed: $f"; fi
-          done < <(eval find dist -type f \\\( "$(find_args '${{ inputs.archive-glob }}')" \\\) -print0)
+          done < <(eval find dist -type f \\\( "$(find_args "$ARCHIVE_GLOB")" \\\) -print0)
           echo "signed=$signed failed=$fail removed=$removed"
           echo "counts=$signed/$fail/$removed" >> "$GITHUB_OUTPUT"
           [ $removed = 0 ] || { echo "gate=4" >> "$GITHUB_OUTPUT"; exit 1; }
@@ -266,20 +273,33 @@ jobs:
         name: Report (fail-open is not silent)
         if: always()
         shell: bash
+        env:
+          G0_GATE: ${{ steps.gate0.outputs.gate }}
+          G0_REASON: ${{ steps.gate0.outputs.reason }}
+          LOGIN_OUTCOME: ${{ steps.login.outcome }}
+          CERT_OUTCOME: ${{ steps.cert.outcome }}
+          CERT_REASON: ${{ steps.cert.outputs.reason }}
+          CERT_SERIAL: ${{ steps.cert.outputs.serial }}
+          SIGN_OUTCOME: ${{ steps.sign.outcome }}
+          SIGN_GATE: ${{ steps.sign.outputs.gate }}
+          SIGN_COUNTS: ${{ steps.sign.outputs.counts }}
+          UPLOAD_OUTCOME: ${{ steps.upload.outcome }}
+          ARTIFACT_NAME: ${{ inputs.artifact-name }}
+          STRICT: ${{ inputs.strict }}
         run: |
           set -uo pipefail
-          gate='${{ steps.gate0.outputs.gate }}'; reason='${{ steps.gate0.outputs.reason }}'
+          gate=$G0_GATE; reason=$G0_REASON
           if [ -z "$gate" ]; then
-            if [ '${{ steps.login.outcome }}' != 'success' ]; then gate=1; reason='OpenBao login failed'
-            elif [ '${{ steps.cert.outcome }}' != 'success' ]; then gate=2; reason='${{ steps.cert.outputs.reason }}'; reason=${reason:-'run certificate not issued'}
-            elif [ '${{ steps.sign.outcome }}' != 'success' ]; then gate='${{ steps.sign.outputs.gate }}'; gate=${gate:-3}; reason="signing failed (signed/failed/removed: ${{ steps.sign.outputs.counts }})"
+            if [ "$LOGIN_OUTCOME" != 'success' ]; then gate=1; reason='OpenBao login failed'
+            elif [ "$CERT_OUTCOME" != 'success' ]; then gate=2; reason=${CERT_REASON:-'run certificate not issued'}
+            elif [ "$SIGN_OUTCOME" != 'success' ]; then gate=${SIGN_GATE:-3}; reason="signing failed (signed/failed/removed: $SIGN_COUNTS)"
             fi
           fi
-          art='${{ inputs.artifact-name }}'; [ '${{ steps.upload.outcome }}' = 'success' ] && art="${art}-signed"
+          art=$ARTIFACT_NAME; [ "$UPLOAD_OUTCOME" = 'success' ] && art="${art}-signed"
           echo "artifact=$art" >> "$GITHUB_OUTPUT"
           if [ -z "$gate" ]; then
             echo "signed=true" >> "$GITHUB_OUTPUT"; echo "gate=" >> "$GITHUB_OUTPUT"
-            { echo '## catboy-sign: signed ✅'; echo; echo "runner issuer \`rn-${CATBOY_RUNNER_ISSUER:-?}\`, leaf serial \`${{ steps.cert.outputs.serial }}\`, files signed/failed/removed: \`${{ steps.sign.outputs.counts }}\`"; echo; echo 'Verify: https://pki.catboy.systems/verify'; } >> "$GITHUB_STEP_SUMMARY"
+            { echo '## catboy-sign: signed ✅'; echo; echo "runner issuer \`rn-${CATBOY_RUNNER_ISSUER:-?}\`, leaf serial \`$CERT_SERIAL\`, files signed/failed/removed: \`$SIGN_COUNTS\`"; echo; echo 'Verify: https://pki.catboy.systems/verify'; } >> "$GITHUB_STEP_SUMMARY"
           else
             echo "signed=false" >> "$GITHUB_OUTPUT"; echo "gate=$gate" >> "$GITHUB_OUTPUT"
             echo "::warning::release NOT signed by catboy.systems (gate $gate: $reason)"
@@ -289,5 +309,5 @@ jobs:
                  '{repo:$repo, run_id:$run_id, gate:($gate|tonumber), reason:$reason, runner:$runner, job_workflow_ref:$wf}' \
                 | curl -sS -m 20 -o /dev/null -w 'unsigned-release: %{http_code}\n' -X POST "$CATCMDB_URL/api/v1/pki/unsigned-release" -H "Authorization: Bearer $CATCMDB_TOKEN" -H 'Content-Type: application/json' -d @- || true
             fi
-            if [ '${{ inputs.strict }}' = 'true' ]; then echo "::error::strict mode: unsigned release refused (gate $gate)"; exit 1; fi
+            if [ "$STRICT" = 'true' ]; then echo "::error::strict mode: unsigned release refused (gate $gate)"; exit 1; fi
           fi
