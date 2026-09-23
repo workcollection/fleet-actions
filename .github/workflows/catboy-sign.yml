@@ -10,17 +10,17 @@
 #   4 signature did not verify — the signature is REMOVED, an unverifiable artifact never ships
 #   5 build artifact not available (the caller's upload failed, usually storage quota)
 #
-# IDENTITY IS TWO-PART (plan §6.7, DEVIATIONS D1 in polo-nyan/catboy-pki):
-#   runner  → AppRole (persistent runners: CATBOY_BAO_ROLE_ID/SECRET_ID in the runner env) or
-#             Kubernetes auth (ARC scale set: pod service-account token). Its policy reaches
-#             only roles named run-<runner>-*.
-#   repo    → the GitHub OIDC token of THIS run (audience https://ca.catboy.systems, bound in
-#             OpenBao/CatCMDB to job_workflow_ref = this file at a v2.* TAG — never a branch).
-#             CatCMDB ensure-repo-issuer needs both before it creates rp-<runner>-<owner>-<repo>.
-#   The run leaf comes from the pair role run-<runner>-<owner>-<repo> (issuer + URIs pinned).
+# IDENTITY IS TWO-PART (plan §6.7; DEVIATIONS D1 + D10 in polo-nyan/catboy-pki — no k8s in this fleet):
+#   repo    → the GitHub OIDC token of THIS run is the ISSUING login (audience
+#             https://ca.catboy.systems, OpenBao role sign-<owner> bound to job_workflow_ref =
+#             this file at a v2.* TAG — never a branch). Its policy reaches only pair roles of
+#             its own repository_id: run-<repository_id>-<runner>.
+#   runner  → AppRole (CATBOY_BAO_ROLE_ID + secret_id from CATBOY_BAO_SECRET_ID_FILE or env).
+#             It can issue NOTHING; it only proves "which runner" to CatCMDB ensure-repo-issuer,
+#             which needs both tokens before it creates rp-<runner>-<owner>-<repo>-<year> + the pair role.
 #
 # Runner env (non-secret + one login credential, set by CatCMDB RunnerService / the ARC pod spec):
-#   CATBOY_BAO_ADDR  CATBOY_RUNNER_ISSUER  CATBOY_BAO_ROLE_ID  CATBOY_BAO_SECRET_ID  CATBOY_TSA_URL
+#   CATBOY_BAO_ADDR  CATBOY_RUNNER_ISSUER  CATBOY_BAO_ROLE_ID  CATBOY_BAO_SECRET_ID_FILE (or _SECRET_ID)  CATBOY_TSA_URL
 #   CATBOY_PKI_BASE (default http://pki.catboy.systems)  CATBOY_ROOT_B64 (R1 PEM, base64; else fetched)
 #   CATCMDB_URL + CATCMDB_TOKEN (scoped: ensure-repo-issuer, certificates/import, pki/unsigned-release)
 #
@@ -117,7 +117,7 @@ jobs:
           echo "gate=" >> "$GITHUB_OUTPUT"; echo "reason=" >> "$GITHUB_OUTPUT"
 
       - id: login
-        name: Gate 1 — runner identity (AppRole / Kubernetes)
+        name: Gate 1 — repo identity (this run's OIDC token → OpenBao) + runner identity (AppRole)
         if: steps.gate0.outputs.gate == ''
         continue-on-error: true
         shell: bash
@@ -125,20 +125,22 @@ jobs:
           set -euo pipefail
           umask 077
           CA_OPT=(); if [ -n "${CATBOY_BAO_CACERT_B64:-}" ]; then echo "$CATBOY_BAO_CACERT_B64" | base64 -d > "$RUNNER_TEMP/bao-ca.pem"; CA_OPT=(--cacert "$RUNNER_TEMP/bao-ca.pem"); fi
-          if [ -n "${CATBOY_BAO_ROLE_ID:-}" ]; then
-            RESP=$(curl -sS --fail-with-body "${CA_OPT[@]}" -X POST "$CATBOY_BAO_ADDR/v1/auth/approle/login" \
-              -H 'Content-Type: application/json' -d "{\"role_id\":\"$CATBOY_BAO_ROLE_ID\",\"secret_id\":\"$CATBOY_BAO_SECRET_ID\"}")
-          elif [ -r /var/run/secrets/kubernetes.io/serviceaccount/token ]; then
-            RESP=$(curl -sS --fail-with-body "${CA_OPT[@]}" -X POST "$CATBOY_BAO_ADDR/v1/auth/kubernetes/login" \
-              -H 'Content-Type: application/json' -d "{\"role\":\"arc-$CATBOY_RUNNER_ISSUER\",\"jwt\":\"$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)\"}")
-          else
-            echo "::error::runner has neither AppRole credentials nor a Kubernetes service-account token"; exit 1
-          fi
-          TOKEN=$(jq -er .auth.client_token <<<"$RESP")
-          echo "::add-mask::$TOKEN"
-          echo "BAO_TOKEN=$TOKEN" >> "$GITHUB_ENV"
           printf '%s' "${CA_OPT[*]:-}" > "$RUNNER_TEMP/ca-opt"
+          # repo identity = the issuing login. GitHub mints this token only inside THIS job, with this workflow ref.
+          OIDC=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=https://ca.catboy.systems" | jq -er .value)
+          echo "::add-mask::$OIDC"
+          RESP=$(curl -sS --fail-with-body "${CA_OPT[@]}" -X POST "$CATBOY_BAO_ADDR/v1/auth/jwt-github/login" \
+            -H 'Content-Type: application/json' -d "{\"role\":\"sign-${GITHUB_REPOSITORY_OWNER}\",\"jwt\":\"$OIDC\"}")
+          TOKEN=$(jq -er .auth.client_token <<<"$RESP"); echo "::add-mask::$TOKEN"; echo "BAO_TOKEN=$TOKEN" >> "$GITHUB_ENV"
+          echo "OIDC_JWT=$OIDC" >> "$GITHUB_ENV"
           echo "policies: $(jq -c .auth.token_policies <<<"$RESP")"
+          # runner identity: proves "which runner" for ensure-repo-issuer only; missing = lazy creation impossible, not a failure here
+          SID=${CATBOY_BAO_SECRET_ID:-}; [ -n "${CATBOY_BAO_SECRET_ID_FILE:-}" ] && [ -r "$CATBOY_BAO_SECRET_ID_FILE" ] && SID=$(cat "$CATBOY_BAO_SECRET_ID_FILE")
+          if [ -n "${CATBOY_BAO_ROLE_ID:-}" ] && [ -n "$SID" ]; then
+            RT=$(curl -sS --fail-with-body "${CA_OPT[@]}" -X POST "$CATBOY_BAO_ADDR/v1/auth/approle/login" \
+              -H 'Content-Type: application/json' -d "{\"role_id\":\"$CATBOY_BAO_ROLE_ID\",\"secret_id\":\"$SID\"}" | jq -er .auth.client_token) \
+              && { echo "::add-mask::$RT"; echo "RUNNER_TOKEN=$RT" >> "$GITHUB_ENV"; } || echo "::warning::runner AppRole login failed — existing pair roles still work, new ones cannot be created"
+          else echo "::notice::no runner AppRole on this runner — existing pair roles still work"; fi
 
       - id: cert
         name: Gate 2 — repo identity + 1-hour run certificate
@@ -150,18 +152,15 @@ jobs:
           umask 077
           read -r -a CA_OPT < "$RUNNER_TEMP/ca-opt" || true
           YEAR=$(date -u +%Y); OWNER=${GITHUB_REPOSITORY_OWNER}; REPO=${GITHUB_REPOSITORY#*/}
-          ROLE="run-${CATBOY_RUNNER_ISSUER}-${OWNER}-${REPO}"
+          ROLE="run-${GITHUB_REPOSITORY_ID}-${CATBOY_RUNNER_ISSUER}"        # D10: keyed by the immutable repository id
           ISSUER="rp-${CATBOY_RUNNER_ISSUER}-${OWNER}-${REPO}-${YEAR}"
-          # repo identity: this run's OIDC token, bound (in OpenBao jwt-github + CatCMDB) to this workflow at a v2.* tag
-          OIDC=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=https://ca.catboy.systems" | jq -er .value)
-          echo "::add-mask::$OIDC"
-          if [ -n "${CATCMDB_URL:-}" ] && [ -n "${CATCMDB_TOKEN:-}" ]; then
-            # lazy: creates rp-<runner>-<owner>-<repo>-<year> + the pair role once, no-op afterwards
+          if [ -n "${CATCMDB_URL:-}" ] && [ -n "${CATCMDB_TOKEN:-}" ] && [ -n "${RUNNER_TOKEN:-}" ]; then
+            # lazy: creates the repo issuer + pair role once (needs BOTH identities), no-op afterwards
             curl -sS -m 30 -o /dev/null -w 'ensure-repo-issuer: %{http_code}\n' -X POST "$CATCMDB_URL/api/v1/pki/ensure-repo-issuer" \
-              -H "Authorization: Bearer $CATCMDB_TOKEN" -H "X-Bao-Token: $BAO_TOKEN" -H "X-GitHub-OIDC: $OIDC" \
-              -H 'Content-Type: application/json' -d "{\"issuer\":\"$ISSUER\",\"runner\":\"$CATBOY_RUNNER_ISSUER\",\"owner\":\"$OWNER\",\"repo\":\"$REPO\",\"year\":$YEAR}" || true
+              -H "Authorization: Bearer $CATCMDB_TOKEN" -H "X-Bao-Token: $RUNNER_TOKEN" -H "X-GitHub-OIDC: $OIDC_JWT" \
+              -H 'Content-Type: application/json' -d "{\"issuer\":\"$ISSUER\",\"runner\":\"$CATBOY_RUNNER_ISSUER\",\"owner\":\"$OWNER\",\"repo\":\"$REPO\",\"repository_id\":$GITHUB_REPOSITORY_ID,\"year\":$YEAR}" || true
           fi
-          # D1: issue through the PAIR ROLE (mount-level path); the direct issuer path is denied to runners
+          # D1/D10: issue through the PAIR ROLE with the OIDC-login token; its policy reaches only run-<own repository_id>-*
           curl -sS --fail-with-body "${CA_OPT[@]}" -X POST "$CATBOY_BAO_ADDR/v1/pki-codesign/issue/$ROLE" \
             -H "X-Vault-Token: $BAO_TOKEN" -H 'Content-Type: application/json' \
             -d "{\"common_name\":\"$GITHUB_REPOSITORY\",\"ttl\":\"1h\",\"uri_sans\":\"https://github.com/$GITHUB_REPOSITORY,https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID\",\"private_key_format\":\"pkcs8\"}" \
@@ -290,7 +289,7 @@ jobs:
           set -uo pipefail
           gate=$G0_GATE; reason=$G0_REASON
           if [ -z "$gate" ]; then
-            if [ "$LOGIN_OUTCOME" != 'success' ]; then gate=1; reason='OpenBao login failed'
+            if [ "$LOGIN_OUTCOME" != 'success' ]; then gate=1; reason='OpenBao login with the run OIDC token failed (role sign-<owner>, tagged workflow ref required)'
             elif [ "$CERT_OUTCOME" != 'success' ]; then gate=2; reason=${CERT_REASON:-'run certificate not issued'}
             elif [ "$SIGN_OUTCOME" != 'success' ]; then gate=${SIGN_GATE:-3}; reason="signing failed (signed/failed/removed: $SIGN_COUNTS)"
             fi
