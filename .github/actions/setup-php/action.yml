@@ -87,7 +87,11 @@ runs:
         set -uo pipefail
         want="$WANT"
         exts="$EXTS"
-        case "$want" in *[!0-9.]*|'') echo "::error::php-version must look like 8.4, got '$want'"; exit 1 ;; esac
+        # Only major.minor is something apt can install; anything else (nightly,
+        # 8.4-dev, latest) defers to the upstream action, which understands it.
+        case "$want" in
+          *[!0-9.]*|'') echo "php-version '$want' is not major.minor - deferring to the fallback action." >&2; exit 0 ;;
+        esac
         echo "ok=false" >> "$GITHUB_OUTPUT"
 
         if ! command -v apt-get >/dev/null 2>&1; then

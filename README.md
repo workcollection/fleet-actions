@@ -5,9 +5,9 @@ Shared composite actions and reusable workflows for the fleet (`polo-nyan`, `smo
 
 ## Why this repo exists
 
-Before it, the fleet had **zero** shared CI infrastructure. Measured across 65 repos and
-197 workflow files: 0 reusable workflows, 0 composite actions, 0 shared `uses:`
-references. Every workflow file was standalone copy-paste, and the copies rotted:
+Before it, the fleet had **zero** shared CI infrastructure.
+Measured across 65 repos and 197 workflow files: 0 reusable workflows, 0 composite
+actions, 0 shared `uses:` references. Every workflow file was standalone copy-paste, and the copies rotted:
 
 | File | Repos | Byte-exact versions | Job-name sets |
 |---|---|---|---|

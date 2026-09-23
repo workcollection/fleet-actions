@@ -47,11 +47,16 @@ permissions:
 
 jobs:
   reap:
-    # A PR event has no business merging other PRs with a write token; callers wire
-    # this to `schedule` / `workflow_dispatch` only, and this line makes that a rule.
-    if: github.event_name != 'pull_request' && github.event_name != 'pull_request_target'
     runs-on: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || inputs.runs-on }}
     steps:
+      # A PR event has no business merging other PRs with a write token; callers wire
+      # this to `schedule` / `workflow_dispatch` only. Fail LOUDLY rather than skip: a
+      # silently-skipped job is a permanently green, permanently inert check.
+      - name: Refuse pull-request events
+        if: github.event_name == 'pull_request' || github.event_name == 'pull_request_target'
+        run: |
+          echo "::error::dependabot-auto-merge must be triggered by schedule or workflow_dispatch, not ${GITHUB_EVENT_NAME} - remove the pull_request trigger from the caller"
+          exit 1
       - name: Merge green Dependabot PRs
         uses: actions/github-script@v9
         env:
