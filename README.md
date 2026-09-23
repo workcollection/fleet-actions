@@ -81,6 +81,16 @@ jobs:
 
 ## Security model
 
+### Pinning policy
+
+Every third-party action is pinned to a **commit SHA** with the version in a trailing
+comment (`uses: actions/checkout@3d3c42e… # v7.0.1`); Dependabot keeps both in step.
+Downloaded scanner binaries (actionlint, gitleaks, osv-scanner) are **checksum-verified**
+against the release's checksum file before they run, and `semgrep`, `govulncheck` and
+`gosec` are installed at fixed versions. A moving tag or a swapped release asset cannot
+change what runs in 60 repos.
+
+
 This repo is public and its workflows run on fleet self-hosted runners, so the
 threat is code from a fork reaching those runners.
 

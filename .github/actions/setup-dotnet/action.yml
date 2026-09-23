@@ -31,7 +31,7 @@ runs:
         # runners have no writable /usr/share/dotnet, so the default location fails.
         echo "DOTNET_INSTALL_DIR=${INSTALL_DIR}" >> "$GITHUB_ENV"
 
-    - uses: actions/setup-dotnet@v6
+    - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
       with:
         dotnet-version: ${{ inputs.dotnet-version }}
 

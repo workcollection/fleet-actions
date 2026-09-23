@@ -21,7 +21,7 @@ jobs:
     name: actionlint + YAML parse
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Parse every action/workflow as YAML
         run: |
           python3 - <<'PY'
@@ -41,9 +41,12 @@ jobs:
           PY
       - name: actionlint
         run: |
-          V=1.7.7
-          curl -sSL "https://github.com/rhysd/actionlint/releases/download/v${V}/actionlint_${V}_linux_amd64.tar.gz" \
-            | tar -xz -C /tmp actionlint
+          V=1.7.12
+          B="https://github.com/rhysd/actionlint/releases/download/v${V}"
+          curl -sSL -o /tmp/al.tgz "${B}/actionlint_${V}_linux_amd64.tar.gz"
+          curl -sSL "${B}/actionlint_${V}_checksums.txt" | grep " actionlint_${V}_linux_amd64.tar.gz$" \
+            | sed 's#  .*# /tmp/al.tgz#' | sha256sum -c - >/dev/null
+          tar -xzf /tmp/al.tgz -C /tmp actionlint
           # Composite action files are not workflows; actionlint only reads workflows.
           /tmp/actionlint -color
 
@@ -51,7 +54,7 @@ jobs:
     name: Smoke - every composite actually runs
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: setup-python composite
         uses: ./.github/actions/setup-python
@@ -91,7 +94,7 @@ jobs:
     name: Smoke - setup-php install path
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - id: php
         uses: ./.github/actions/setup-php
         with:
