@@ -46,22 +46,28 @@ jobs:
     name: Secret scan (gitleaks)
     runs-on: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || inputs.runs-on }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { fetch-depth: 0 }
       - name: Install + run gitleaks
         continue-on-error: true
         run: |
           echo '## 🔑 gitleaks (secrets)' >> "$GITHUB_STEP_SUMMARY"
-          V=8.21.2
-          curl -sSL "https://github.com/gitleaks/gitleaks/releases/download/v${V}/gitleaks_${V}_linux_x64.tar.gz" \
-            | tar -xz -C /tmp gitleaks 2>/dev/null || { echo '_gitleaks download failed_' >> "$GITHUB_STEP_SUMMARY"; exit 0; }
+          V=8.30.1
+          B="https://github.com/gitleaks/gitleaks/releases/download/v${V}"
+          # Checksum-verified: a shared workflow must not execute whatever a download returns.
+          if ! curl -sSL -o /tmp/gl.tgz "${B}/gitleaks_${V}_linux_x64.tar.gz" \
+             || ! curl -sSL "${B}/gitleaks_${V}_checksums.txt" | grep " gitleaks_${V}_linux_x64.tar.gz$" \
+                  | sed 's#  .*# /tmp/gl.tgz#' | sha256sum -c - >/dev/null \
+             || ! tar -xzf /tmp/gl.tgz -C /tmp gitleaks; then
+            echo '_gitleaks download or checksum failed_' >> "$GITHUB_STEP_SUMMARY"; exit 0
+          fi
           if /tmp/gitleaks detect --source . --no-banner --redact --report-format json --report-path /tmp/gitleaks.json 2>/tmp/gl.log; then
             echo '✅ no leaks found' >> "$GITHUB_STEP_SUMMARY"
           else
             n=$(python3 -c "import json;print(len(json.load(open('/tmp/gitleaks.json'))))" 2>/dev/null || echo '?')
             echo "⚠️ **$n potential secret(s)** — see the gitleaks artifact" >> "$GITHUB_STEP_SUMMARY"
           fi
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         continue-on-error: true   # artifact quota must not fail the job
         if: always()
         with: { name: gitleaks-report, path: /tmp/gitleaks.json, if-no-files-found: ignore, retention-days: 7 }
@@ -70,30 +76,39 @@ jobs:
     name: Dependency CVEs (OSV-Scanner)
     runs-on: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || inputs.runs-on }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install + run OSV-Scanner
         continue-on-error: true
         run: |
           echo '## 📦 OSV-Scanner (dependency CVEs)' >> "$GITHUB_STEP_SUMMARY"
-          V=1.9.2
-          if ! curl -sSL -o /tmp/osv "https://github.com/google/osv-scanner/releases/download/v${V}/osv-scanner_linux_amd64" \
+          V=2.6.0
+          B="https://github.com/google/osv-scanner/releases/download/v${V}"
+          if ! curl -sSL -o /tmp/osv "${B}/osv-scanner_linux_amd64" \
+             || ! curl -sSL "${B}/osv-scanner_SHA256SUMS" | grep " osv-scanner_linux_amd64$" \
+                  | sed 's#  .*# /tmp/osv#' | sha256sum -c - >/dev/null \
              || ! chmod +x /tmp/osv; then
-            echo '_osv-scanner download failed_' >> "$GITHUB_STEP_SUMMARY"
+            echo '_osv-scanner download or checksum failed_' >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
-          if /tmp/osv scan --recursive --format table --output /tmp/osv.txt . 2>/tmp/osv.log; then
-            echo '✅ no known dependency vulnerabilities' >> "$GITHUB_STEP_SUMMARY"
-          else
-            {
-              echo '<details><summary>vulnerable dependencies</summary>'
-              echo ''
-              echo '```'
-              head -120 /tmp/osv.txt 2>/dev/null || true
-              echo '```'
-              echo '</details>'
-            } >> "$GITHUB_STEP_SUMMARY"
-          fi
-      - uses: actions/upload-artifact@v7
+          # v2 CLI: `scan source` replaces the bare `scan`; --recursive/--format/--output unchanged.
+          # Exit codes (measured with 2.6.0): 0 clean, 1 vulnerabilities found, 128 no package
+          # sources in the tree (nothing to scan - not a finding), anything else = tool error.
+          rc=0
+          /tmp/osv scan source --recursive --format table --output /tmp/osv.txt . 2>/tmp/osv.log || rc=$?
+          case "$rc" in
+            0)   echo '✅ no known dependency vulnerabilities' >> "$GITHUB_STEP_SUMMARY" ;;
+            1)   {
+                   echo '<details><summary>vulnerable dependencies</summary>'
+                   echo ''
+                   echo '```'
+                   head -120 /tmp/osv.txt 2>/dev/null || true
+                   echo '```'
+                   echo '</details>'
+                 } >> "$GITHUB_STEP_SUMMARY" ;;
+            128) echo '_no dependency manifests or lockfiles found - nothing to scan_' >> "$GITHUB_STEP_SUMMARY" ;;
+            *)   echo "_osv-scanner failed (exit ${rc}) - see the artifact_" >> "$GITHUB_STEP_SUMMARY" ;;
+          esac
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         continue-on-error: true   # artifact quota must not fail the job
         if: always()
         with: { name: osv-report, path: /tmp/osv.txt, if-no-files-found: ignore, retention-days: 7 }
@@ -102,13 +117,13 @@ jobs:
     name: SAST (Semgrep)
     runs-on: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || inputs.runs-on }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: workcollection/fleet-actions/.github/actions/setup-python@v1
       - name: Install + run Semgrep
         continue-on-error: true
         run: |
           echo '## 🔎 Semgrep (SAST)' >> "$GITHUB_STEP_SUMMARY"
-          python3 -m pip install --quiet --disable-pip-version-check semgrep || { echo '_semgrep install failed_' >> "$GITHUB_STEP_SUMMARY"; exit 0; }
+          python3 -m pip install --quiet --disable-pip-version-check 'semgrep==1.177.0' || { echo '_semgrep install failed_' >> "$GITHUB_STEP_SUMMARY"; exit 0; }
           semgrep scan --config=auto --quiet --json --output=/tmp/semgrep.json . 2>/tmp/sg.log || true
           python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY" || echo '_semgrep parse failed_' >> "$GITHUB_STEP_SUMMARY"
           import json, collections
@@ -124,7 +139,7 @@ jobs:
                   print(f"{x.get('path','?')}:{x.get('start',{}).get('line','?')}  {x.get('check_id','')}")
               print('```\n</details>')
           PY
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         continue-on-error: true   # artifact quota must not fail the job
         if: always()
         with: { name: semgrep-report, path: /tmp/semgrep.json, if-no-files-found: ignore, retention-days: 7 }
@@ -136,15 +151,16 @@ jobs:
     # runner/workspace exists → "Unrecognized function: 'hashFiles'", 0 jobs, whole workflow
     # rejected). Guard the go-only steps at STEP level instead, where the workspace exists.
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: workcollection/fleet-actions/.github/actions/setup-go@v1
         if: hashFiles('**/go.mod') != ''
       - name: Install + run govulncheck & gosec
         if: hashFiles('**/go.mod') != ''
         continue-on-error: true
         run: |
-          go install golang.org/x/vuln/cmd/govulncheck@latest
-          go install github.com/securego/gosec/v2/cmd/gosec@latest
+          # Pinned: a shared workflow should not change behaviour because upstream tagged a release overnight.
+          go install golang.org/x/vuln/cmd/govulncheck@v1.8.0
+          go install github.com/securego/gosec/v2/cmd/gosec@v2.29.0
           GB="$(go env GOPATH)/bin"
           echo '## 🐹 Go security' >> "$GITHUB_STEP_SUMMARY"
           echo '### govulncheck' >> "$GITHUB_STEP_SUMMARY"
