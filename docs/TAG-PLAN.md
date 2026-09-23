@@ -50,14 +50,14 @@ the immutable-tag ruleset; it stays where it is).
 | Scanner binaries | unverified downloads, `@latest` tools | checksum-verified actionlint 1.7.12 / gitleaks 8.30.1 / osv-scanner 2.6.0 (`scan source`, explicit exit codes); `semgrep`, `govulncheck`, `gosec` pinned |
 | `fleet-check` | conventions only | plus a per-job **fork-exposure detector** (`pull_request_target`, public + `pull_request` + self-hosted) |
 | New | — | **`pvr-check.yml`** (private vulnerability reporting + security policy) and `templates/SECURITY.md` |
-| Reserved | — | **`catboy-sign.yml`** (see below) |
+| New in v2.1.0 | — | **`catboy-sign.yml`** (see below) |
 
 Nothing in v2 changes an existing input name or default. A v1 caller stub works
 unchanged after `@v1` → `@v2.0.0`; the two behaviour changes that can surface are the
 fork guard (fork PRs now run on `ubuntu-latest`) and the reaper refusing PR events
 (a caller wired to `pull_request` turns red on purpose).
 
-### Reserved seam: `catboy-sign.yml` (owned by the catboy-pki project — not implemented here)
+### `catboy-sign.yml` (owned by the catboy-pki project — implemented, lands in v2.1.0)
 
 The code-signing step of the catboy.systems PKI plans to ship as a reusable workflow
 in **this** repository, so every release workflow in the fleet can call one line:

@@ -1,0 +1,281 @@
+# catboy-sign — sign release artifacts with the catboy.systems PKI (plan catboy-pki v2.2 §6.7).
+#
+# FAIL-OPEN, NEVER SILENT. The job exits 0 on every path; what changes is whether the
+# artifact comes back signed. Every unsigned outcome is (a) a ::warning, (b) `signed=false`
+# + `gate=<n>` in the outputs and the step summary, (c) POSTed to CatCMDB
+# /pki/unsigned-release so a broken CA or runner binding raises a correlator event on the
+# first release, not after a quiet quarter. Gates:
+#   0 no CA configured on this runner (ubuntu-latest, or a runner without signing identity)
+#   1 login to OpenBao failed        2 run certificate not issued      3 signing tool/step failed
+#   4 signature did not verify — the signature is REMOVED, an unverifiable artifact never ships
+#   5 build artifact not available (the caller's upload failed, usually storage quota)
+#
+# IDENTITY IS TWO-PART (plan §6.7, DEVIATIONS D1 in polo-nyan/catboy-pki):
+#   runner  → AppRole (persistent runners: CATBOY_BAO_ROLE_ID/SECRET_ID in the runner env) or
+#             Kubernetes auth (ARC scale set: pod service-account token). Its policy reaches
+#             only roles named run-<runner>-*.
+#   repo    → the GitHub OIDC token of THIS run (audience https://ca.catboy.systems, bound in
+#             OpenBao/CatCMDB to job_workflow_ref = this file at a v2.* TAG — never a branch).
+#             CatCMDB ensure-repo-issuer needs both before it creates rp-<runner>-<owner>-<repo>.
+#   The run leaf comes from the pair role run-<runner>-<owner>-<repo> (issuer + URIs pinned).
+#
+# Runner env (non-secret + one login credential, set by CatCMDB RunnerService / the ARC pod spec):
+#   CATBOY_BAO_ADDR  CATBOY_RUNNER_ISSUER  CATBOY_BAO_ROLE_ID  CATBOY_BAO_SECRET_ID  CATBOY_TSA_URL
+#   CATBOY_PKI_BASE (default http://pki.catboy.systems)  CATBOY_ROOT_B64 (R1 PEM, base64; else fetched)
+#   CATCMDB_URL + CATCMDB_TOKEN (scoped: ensure-repo-issuer, certificates/import, pki/unsigned-release)
+#
+# Consumers pin an exact tag (docs/TAG-PLAN.md). The caller uploads its build output as an
+# artifact and passes the name; the signed copy comes back as `<artifact-name>-signed`.
+name: catboy-sign
+
+on:
+  workflow_call:
+    inputs:
+      artifact-name:
+        description: 'Name of the build artifact (uploaded by the caller) whose files get signed.'
+        type: string
+        required: true
+      pe-glob:
+        description: 'Files to Authenticode-sign (find -name patterns, space separated).'
+        type: string
+        required: false
+        default: '*.exe *.dll *.msi'
+      archive-glob:
+        description: 'Files that get a detached CMS signature (<file>.p7s).'
+        type: string
+        required: false
+        default: '*.zip *.tar.gz *.tgz *.nupkg'
+      runs-on:
+        description: 'Runner label(s). Signing needs a fleet runner; ubuntu-latest takes gate 0 by design.'
+        type: string
+        required: false
+        default: 'self-hosted'
+      attest:
+        description: 'Also produce a GitHub artifact attestation (Sigstore) — independent of the CA.'
+        type: boolean
+        required: false
+        default: true
+      strict:
+        description: 'Fail the job when the artifact could not be signed (opt-in; default is fail-open).'
+        type: boolean
+        required: false
+        default: false
+    outputs:
+      signed:
+        description: 'true when every requested file was signed AND verified'
+        value: ${{ jobs.sign.outputs.signed }}
+      gate:
+        description: 'which fail-open gate tripped (empty when signed)'
+        value: ${{ jobs.sign.outputs.gate }}
+      artifact:
+        description: 'name of the artifact that carries the (signed or unsigned) files'
+        value: ${{ jobs.sign.outputs.artifact }}
+
+permissions:
+  contents: read
+  id-token: write
+  attestations: write
+
+jobs:
+  sign:
+    name: catboy-sign
+    # FORK GUARD (same as every fleet workflow): a fork PR never runs on a fleet runner.
+    runs-on: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || inputs.runs-on }}
+    timeout-minutes: 20
+    outputs:
+      signed: ${{ steps.report.outputs.signed }}
+      gate: ${{ steps.report.outputs.gate }}
+      artifact: ${{ steps.report.outputs.artifact }}
+    steps:
+      - id: fetch
+        name: Build artifact
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        continue-on-error: true
+        with:
+          name: ${{ inputs.artifact-name }}
+          path: dist
+
+      - id: gate0
+        name: Gate 0 — is a CA configured on this runner?
+        shell: bash
+        run: |
+          set -uo pipefail
+          if [ '${{ steps.fetch.outcome }}' != 'success' ] || [ ! -d dist ]; then
+            echo "gate=5" >> "$GITHUB_OUTPUT"; echo "reason=build artifact '${{ inputs.artifact-name }}' not available" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          if [ -z "${CATBOY_BAO_ADDR:-}" ] || [ -z "${CATBOY_RUNNER_ISSUER:-}" ]; then
+            echo "gate=0" >> "$GITHUB_OUTPUT"; echo "reason=no CA configured on runner '${RUNNER_NAME:-?}'" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          for t in curl jq openssl; do command -v "$t" >/dev/null || { echo "gate=3" >> "$GITHUB_OUTPUT"; echo "reason=missing tool $t" >> "$GITHUB_OUTPUT"; exit 0; }; done
+          if ! command -v osslsigncode >/dev/null; then
+            (sudo -n apt-get install -y -qq osslsigncode >/dev/null 2>&1 || apt-get install -y -qq osslsigncode >/dev/null 2>&1) || true
+            command -v osslsigncode >/dev/null || { echo "gate=3" >> "$GITHUB_OUTPUT"; echo "reason=osslsigncode not installed on runner '${RUNNER_NAME:-?}'" >> "$GITHUB_OUTPUT"; exit 0; }
+          fi
+          echo "gate=" >> "$GITHUB_OUTPUT"; echo "reason=" >> "$GITHUB_OUTPUT"
+
+      - id: login
+        name: Gate 1 — runner identity (AppRole / Kubernetes)
+        if: steps.gate0.outputs.gate == ''
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          CA_OPT=(); if [ -n "${CATBOY_BAO_CACERT_B64:-}" ]; then echo "$CATBOY_BAO_CACERT_B64" | base64 -d > "$RUNNER_TEMP/bao-ca.pem"; CA_OPT=(--cacert "$RUNNER_TEMP/bao-ca.pem"); fi
+          if [ -n "${CATBOY_BAO_ROLE_ID:-}" ]; then
+            RESP=$(curl -sS --fail-with-body "${CA_OPT[@]}" -X POST "$CATBOY_BAO_ADDR/v1/auth/approle/login" \
+              -H 'Content-Type: application/json' -d "{\"role_id\":\"$CATBOY_BAO_ROLE_ID\",\"secret_id\":\"$CATBOY_BAO_SECRET_ID\"}")
+          elif [ -r /var/run/secrets/kubernetes.io/serviceaccount/token ]; then
+            RESP=$(curl -sS --fail-with-body "${CA_OPT[@]}" -X POST "$CATBOY_BAO_ADDR/v1/auth/kubernetes/login" \
+              -H 'Content-Type: application/json' -d "{\"role\":\"arc-$CATBOY_RUNNER_ISSUER\",\"jwt\":\"$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)\"}")
+          else
+            echo "::error::runner has neither AppRole credentials nor a Kubernetes service-account token"; exit 1
+          fi
+          TOKEN=$(jq -er .auth.client_token <<<"$RESP")
+          echo "::add-mask::$TOKEN"
+          echo "BAO_TOKEN=$TOKEN" >> "$GITHUB_ENV"
+          printf '%s' "${CA_OPT[*]:-}" > "$RUNNER_TEMP/ca-opt"
+          echo "policies: $(jq -c .auth.token_policies <<<"$RESP")"
+
+      - id: cert
+        name: Gate 2 — repo identity + 1-hour run certificate
+        if: steps.gate0.outputs.gate == '' && steps.login.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          read -r -a CA_OPT < "$RUNNER_TEMP/ca-opt" || true
+          YEAR=$(date -u +%Y); OWNER=${GITHUB_REPOSITORY_OWNER}; REPO=${GITHUB_REPOSITORY#*/}
+          ROLE="run-${CATBOY_RUNNER_ISSUER}-${OWNER}-${REPO}"
+          ISSUER="rp-${CATBOY_RUNNER_ISSUER}-${OWNER}-${REPO}-${YEAR}"
+          # repo identity: this run's OIDC token, bound (in OpenBao jwt-github + CatCMDB) to this workflow at a v2.* tag
+          OIDC=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=https://ca.catboy.systems" | jq -er .value)
+          echo "::add-mask::$OIDC"
+          if [ -n "${CATCMDB_URL:-}" ] && [ -n "${CATCMDB_TOKEN:-}" ]; then
+            # lazy: creates rp-<runner>-<owner>-<repo>-<year> + the pair role once, no-op afterwards
+            curl -sS -m 30 -o /dev/null -w 'ensure-repo-issuer: %{http_code}\n' -X POST "$CATCMDB_URL/api/v1/pki/ensure-repo-issuer" \
+              -H "Authorization: Bearer $CATCMDB_TOKEN" -H "X-Bao-Token: $BAO_TOKEN" -H "X-GitHub-OIDC: $OIDC" \
+              -H 'Content-Type: application/json' -d "{\"issuer\":\"$ISSUER\",\"runner\":\"$CATBOY_RUNNER_ISSUER\",\"owner\":\"$OWNER\",\"repo\":\"$REPO\",\"year\":$YEAR}" || true
+          fi
+          # D1: issue through the PAIR ROLE (mount-level path); the direct issuer path is denied to runners
+          curl -sS --fail-with-body "${CA_OPT[@]}" -X POST "$CATBOY_BAO_ADDR/v1/pki-codesign/issue/$ROLE" \
+            -H "X-Vault-Token: $BAO_TOKEN" -H 'Content-Type: application/json' \
+            -d "{\"common_name\":\"$GITHUB_REPOSITORY\",\"ttl\":\"1h\",\"uri_sans\":\"https://github.com/$GITHUB_REPOSITORY,https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID\",\"private_key_format\":\"pkcs8\"}" \
+            > "$RUNNER_TEMP/cert.json"
+          jq -er .data.certificate "$RUNNER_TEMP/cert.json" > "$RUNNER_TEMP/sign.crt"
+          jq -er .data.private_key "$RUNNER_TEMP/cert.json" > "$RUNNER_TEMP/sign.key"
+          jq -er '.data.ca_chain[]' "$RUNNER_TEMP/cert.json" > "$RUNNER_TEMP/chain.pem"
+          SERIAL=$(jq -er .data.serial_number "$RUNNER_TEMP/cert.json"); echo "serial=$SERIAL" >> "$GITHUB_OUTPUT"
+          # trust anchor for local verification: runner env, else the published root
+          if [ -n "${CATBOY_ROOT_B64:-}" ]; then echo "$CATBOY_ROOT_B64" | base64 -d > "$RUNNER_TEMP/root.crt"
+          else curl -sS -m 20 --fail "${CATBOY_PKI_BASE:-http://pki.catboy.systems}/certs/r1.crt" -o "$RUNNER_TEMP/root.crt"; fi
+          openssl verify -CAfile "$RUNNER_TEMP/root.crt" -untrusted "$RUNNER_TEMP/chain.pem" "$RUNNER_TEMP/sign.crt" >/dev/null
+          # CRLs of every level for the verify step: fetch each chain cert's CDP (missing ones
+          # are only a notice here; the verify step then relies on osslsigncode's own CDP fetch)
+          : > "$RUNNER_TEMP/crls.pem"
+          csplit -s -z -f "$RUNNER_TEMP/c-" "$RUNNER_TEMP/chain.pem" '/BEGIN CERTIFICATE/' '{*}' || true
+          for f in "$RUNNER_TEMP"/sign.crt "$RUNNER_TEMP"/c-*; do
+            openssl x509 -in "$f" -noout -ext crlDistributionPoints 2>/dev/null | grep -o 'URI:[^ ,]*' | cut -c5-
+          done | sort -u | while read -r url; do
+            if curl -sS -m 15 --fail "$url" -o "$RUNNER_TEMP/one.crl" 2>/dev/null; then
+              { openssl crl -in "$RUNNER_TEMP/one.crl" -inform DER -outform PEM 2>/dev/null || openssl crl -in "$RUNNER_TEMP/one.crl" -outform PEM; } >> "$RUNNER_TEMP/crls.pem"
+            else echo "::notice::CRL not fetched: $url"; fi
+          done
+          # mirror the leaf into CatCMDB so revocation-by-run is a lookup, not an enumeration
+          if [ -n "${CATCMDB_URL:-}" ] && [ -n "${CATCMDB_TOKEN:-}" ]; then
+            jq -n --arg cert "$(cat "$RUNNER_TEMP/sign.crt")" --arg chain "$(cat "$RUNNER_TEMP/chain.pem")" --arg issuer "$ISSUER" \
+                  --arg runner "$CATBOY_RUNNER_ISSUER" --arg run_id "$GITHUB_RUN_ID" --arg sha "$GITHUB_SHA" --arg ref "$GITHUB_REF" --arg wf "${GITHUB_WORKFLOW_REF:-}" \
+                  '{certificate:$cert, chain:$chain, issuer:$issuer, runner:$runner, run_id:$run_id, sha:$sha, ref:$ref, job_workflow_ref:$wf}' \
+              | curl -sS -m 30 -o /dev/null -w 'certificates/import: %{http_code}\n' -X POST "$CATCMDB_URL/api/v1/certificates/import" \
+                  -H "Authorization: Bearer $CATCMDB_TOKEN" -H 'Content-Type: application/json' -d @- || true
+          fi
+          echo "issued $SERIAL from $ISSUER via role $ROLE"
+
+      - id: sign
+        name: Gate 3/4 — Authenticode + CMS, verified, unverifiable signatures removed
+        if: steps.gate0.outputs.gate == '' && steps.cert.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -uo pipefail
+          fail=0; signed=0; removed=0
+          TS=(); [ -n "${CATBOY_TSA_URL:-}" ] && TS=(-ts "$CATBOY_TSA_URL") || echo "::warning::CATBOY_TSA_URL unset — signatures carry no timestamp and expire with the 1-hour leaf"
+          CRL=(); [ -s "$RUNNER_TEMP/crls.pem" ] && CRL=(-CRLfile "$RUNNER_TEMP/crls.pem")
+          cat "$RUNNER_TEMP/sign.crt" "$RUNNER_TEMP/chain.pem" > "$RUNNER_TEMP/signchain.pem"
+          { echo "# Signatures"; echo; echo "Signed by catboy.systems PKI for \`$GITHUB_REPOSITORY\` run $GITHUB_RUN_ID (leaf serial ${{ steps.cert.outputs.serial }})."; echo; echo '| file | sha256 | signature |'; echo '|---|---|---|'; } > dist/SIGNATURES.md
+          # shellcheck disable=SC2086
+          find_args() { local first=1; for p in $1; do [ $first = 1 ] || printf ' -o'; printf ' -name %q' "$p"; first=0; done; }
+          while IFS= read -r -d '' f; do
+            if osslsigncode sign -certs "$RUNNER_TEMP/signchain.pem" -key "$RUNNER_TEMP/sign.key" -h sha256 -n "$GITHUB_REPOSITORY" "${TS[@]}" -in "$f" -out "$f.signed" >/dev/null 2>&1 && mv "$f.signed" "$f"; then
+              if osslsigncode verify -CAfile "$RUNNER_TEMP/root.crt" "${CRL[@]}" -in "$f" >/dev/null 2>&1; then
+                signed=$((signed+1)); echo "| \`${f#dist/}\` | $(sha256sum "$f" | cut -c1-64) | Authenticode |" >> dist/SIGNATURES.md
+              else
+                osslsigncode remove-signature -in "$f" -out "$f.u" >/dev/null 2>&1 && mv "$f.u" "$f"; removed=$((removed+1)); echo "::warning::unverifiable signature removed: $f"
+              fi
+            else rm -f "$f.signed"; fail=$((fail+1)); echo "::warning::sign failed: $f"; fi
+          done < <(eval find dist -type f \\\( "$(find_args '${{ inputs.pe-glob }}')" \\\) -print0)
+          while IFS= read -r -d '' f; do
+            if openssl cms -sign -binary -in "$f" -signer "$RUNNER_TEMP/sign.crt" -inkey "$RUNNER_TEMP/sign.key" -certfile "$RUNNER_TEMP/chain.pem" -outform DER -out "$f.p7s" 2>/dev/null \
+               && openssl cms -verify -binary -content "$f" -in "$f.p7s" -inform DER -CAfile "$RUNNER_TEMP/root.crt" -purpose any -out /dev/null 2>/dev/null; then
+              signed=$((signed+1)); echo "| \`${f#dist/}\` | $(sha256sum "$f" | cut -c1-64) | CMS detached \`${f##*/}.p7s\` |" >> dist/SIGNATURES.md
+            else rm -f "$f.p7s"; fail=$((fail+1)); echo "::warning::CMS sign/verify failed: $f"; fi
+          done < <(eval find dist -type f \\\( "$(find_args '${{ inputs.archive-glob }}')" \\\) -print0)
+          echo "signed=$signed failed=$fail removed=$removed"
+          echo "counts=$signed/$fail/$removed" >> "$GITHUB_OUTPUT"
+          [ $removed = 0 ] || { echo "gate=4" >> "$GITHUB_OUTPUT"; exit 1; }
+          [ $fail = 0 ] || { echo "gate=3" >> "$GITHUB_OUTPUT"; exit 1; }
+
+      - name: Shred the run key
+        if: always()
+        shell: bash
+        run: |
+          [ -f "$RUNNER_TEMP/sign.key" ] && (shred -u "$RUNNER_TEMP/sign.key" 2>/dev/null || rm -f "$RUNNER_TEMP/sign.key"); rm -f "$RUNNER_TEMP/cert.json"; true
+
+      - id: attest
+        name: GitHub artifact attestation (independent of the CA)
+        if: inputs.attest && steps.gate0.outputs.gate != '5' && hashFiles('dist/**') != ''
+        continue-on-error: true
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: 'dist/**'
+
+      - id: upload
+        name: Upload the (signed) artifact
+        if: steps.gate0.outputs.gate != '5'
+        continue-on-error: true   # artifact quota must not fail the job
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ${{ inputs.artifact-name }}-signed
+          path: dist
+          retention-days: 7
+
+      - id: report
+        name: Report (fail-open is not silent)
+        if: always()
+        shell: bash
+        run: |
+          set -uo pipefail
+          gate='${{ steps.gate0.outputs.gate }}'; reason='${{ steps.gate0.outputs.reason }}'
+          if [ -z "$gate" ]; then
+            if [ '${{ steps.login.outcome }}' != 'success' ]; then gate=1; reason='OpenBao login failed'
+            elif [ '${{ steps.cert.outcome }}' != 'success' ]; then gate=2; reason='run certificate not issued'
+            elif [ '${{ steps.sign.outcome }}' != 'success' ]; then gate='${{ steps.sign.outputs.gate }}'; gate=${gate:-3}; reason="signing failed (signed/failed/removed: ${{ steps.sign.outputs.counts }})"
+            fi
+          fi
+          art='${{ inputs.artifact-name }}'; [ '${{ steps.upload.outcome }}' = 'success' ] && art="${art}-signed"
+          echo "artifact=$art" >> "$GITHUB_OUTPUT"
+          if [ -z "$gate" ]; then
+            echo "signed=true" >> "$GITHUB_OUTPUT"; echo "gate=" >> "$GITHUB_OUTPUT"
+            { echo '## catboy-sign: signed ✅'; echo; echo "runner issuer \`rn-${CATBOY_RUNNER_ISSUER:-?}\`, leaf serial \`${{ steps.cert.outputs.serial }}\`, files signed/failed/removed: \`${{ steps.sign.outputs.counts }}\`"; echo; echo 'Verify: https://pki.catboy.systems/verify'; } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "signed=false" >> "$GITHUB_OUTPUT"; echo "gate=$gate" >> "$GITHUB_OUTPUT"
+            echo "::warning::release NOT signed by catboy.systems (gate $gate: $reason)"
+            { echo "## catboy-sign: NOT signed ⚠️ (gate $gate)"; echo; echo "$reason"; echo; echo 'The release ships unsigned but attested; the event is recorded in CatCMDB.'; } >> "$GITHUB_STEP_SUMMARY"
+            if [ -n "${CATCMDB_URL:-}" ] && [ -n "${CATCMDB_TOKEN:-}" ]; then
+              jq -n --arg repo "$GITHUB_REPOSITORY" --arg run_id "$GITHUB_RUN_ID" --arg gate "$gate" --arg reason "$reason" --arg runner "${RUNNER_NAME:-}" --arg wf "${GITHUB_WORKFLOW_REF:-}" \
+                 '{repo:$repo, run_id:$run_id, gate:($gate|tonumber), reason:$reason, runner:$runner, job_workflow_ref:$wf}' \
+                | curl -sS -m 20 -o /dev/null -w 'unsigned-release: %{http_code}\n' -X POST "$CATCMDB_URL/api/v1/pki/unsigned-release" -H "Authorization: Bearer $CATCMDB_TOKEN" -H 'Content-Type: application/json' -d @- || true
+            fi
+            if [ '${{ inputs.strict }}' = 'true' ]; then echo "::error::strict mode: unsigned release refused (gate $gate)"; exit 1; fi
+          fi
