@@ -21,7 +21,10 @@
 #
 # Runner env (non-secret + one login credential, set by CatCMDB RunnerService / the ARC pod spec):
 #   CATBOY_BAO_ADDR  CATBOY_RUNNER_ISSUER  CATBOY_BAO_ROLE_ID  CATBOY_BAO_SECRET_ID_FILE (or _SECRET_ID)  CATBOY_TSA_URL
-#   CATBOY_PKI_BASE (default http://pki.catboy.systems)  CATBOY_ROOT_B64 (R1 PEM, base64; else fetched)
+#   CATBOY_PKI_BASE (default http://pki.catboy.systems)  CATBOY_ROOT_B64 (root PEM, base64; else fetched)
+#   CA generation (routing only, so a tag never names a CA; OpenBao policy is the gate):
+#   CATBOY_PKI_CODESIGN_MOUNT (default pki-codesign)  CATBOY_ROOT_NAME (default r1)
+#   CATBOY_TIMESTAMP_CA_NAME (default t1). Staging R0: pki-stg-codesign / r0 / t0.
 #   CATCMDB_URL + CATCMDB_TOKEN (scoped: ensure-repo-issuer, certificates/import, pki/unsigned-release)
 #
 # Consumers pin an exact tag (docs/TAG-PLAN.md). The caller uploads its build output as an
@@ -109,6 +112,9 @@ jobs:
           if [ -z "${CATBOY_BAO_ADDR:-}" ] || [ -z "${CATBOY_RUNNER_ISSUER:-}" ]; then
             echo "gate=0" >> "$GITHUB_OUTPUT"; echo "reason=no CA configured on runner ${RUNNER_NAME:-?}" >> "$GITHUB_OUTPUT"; exit 0
           fi
+          for v in "${CATBOY_PKI_CODESIGN_MOUNT:-pki-codesign}" "${CATBOY_ROOT_NAME:-r1}" "${CATBOY_TIMESTAMP_CA_NAME:-t1}"; do
+            [[ $v =~ ^[a-z0-9][a-z0-9-]{0,62}$ ]] || { echo "gate=3" >> "$GITHUB_OUTPUT"; echo "reason=bad CA routing value on runner ${RUNNER_NAME:-?}" >> "$GITHUB_OUTPUT"; exit 0; }
+          done
           for t in curl jq openssl; do command -v "$t" >/dev/null || { echo "gate=3" >> "$GITHUB_OUTPUT"; echo "reason=missing tool $t" >> "$GITHUB_OUTPUT"; exit 0; }; done
           if ! command -v osslsigncode >/dev/null; then
             (sudo -n apt-get install -y -qq osslsigncode >/dev/null 2>&1 || apt-get install -y -qq osslsigncode >/dev/null 2>&1) || true
@@ -161,7 +167,7 @@ jobs:
               -H 'Content-Type: application/json' -d "{\"issuer\":\"$ISSUER\",\"runner\":\"$CATBOY_RUNNER_ISSUER\",\"owner\":\"$OWNER\",\"repo\":\"$REPO\",\"repository_id\":$GITHUB_REPOSITORY_ID,\"year\":$YEAR}" || true
           fi
           # D1/D10: issue through the PAIR ROLE with the OIDC-login token; its policy reaches only run-<own repository_id>-*
-          curl -sS --fail-with-body "${CA_OPT[@]}" -X POST "$CATBOY_BAO_ADDR/v1/pki-codesign/issue/$ROLE" \
+          curl -sS --fail-with-body "${CA_OPT[@]}" -X POST "$CATBOY_BAO_ADDR/v1/${CATBOY_PKI_CODESIGN_MOUNT:-pki-codesign}/issue/$ROLE" \
             -H "X-Vault-Token: $BAO_TOKEN" -H 'Content-Type: application/json' \
             -d "{\"common_name\":\"$GITHUB_REPOSITORY\",\"ttl\":\"1h\",\"uri_sans\":\"https://github.com/$GITHUB_REPOSITORY,https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID\",\"private_key_format\":\"pkcs8\"}" \
             > "$RUNNER_TEMP/cert.json"
@@ -171,10 +177,10 @@ jobs:
           SERIAL=$(jq -er .data.serial_number "$RUNNER_TEMP/cert.json"); echo "serial=$SERIAL" >> "$GITHUB_OUTPUT"
           # trust anchor for local verification: runner env, else the published root
           if [ -n "${CATBOY_ROOT_B64:-}" ]; then echo "$CATBOY_ROOT_B64" | base64 -d > "$RUNNER_TEMP/root.crt"
-          else curl -sS -m 20 --fail "${CATBOY_PKI_BASE:-http://pki.catboy.systems}/certs/r1.crt" -o "$RUNNER_TEMP/root.crt"; fi
+          else curl -sS -m 20 --fail "${CATBOY_PKI_BASE:-http://pki.catboy.systems}/certs/${CATBOY_ROOT_NAME:-r1}.crt" -o "$RUNNER_TEMP/root.crt"; fi
           openssl verify -CAfile "$RUNNER_TEMP/root.crt" -untrusted "$RUNNER_TEMP/chain.pem" "$RUNNER_TEMP/sign.crt" >/dev/null
           # HARD GATE (catboy-pki G-CRL): every CRL a verifier will fetch must already be published.
-          # Fetch each chain cert's CDP plus the TSA chain (T1 cert + CRL) and STOP with a named
+          # Fetch each chain cert's CDP plus the TSA chain (timestamp CA cert + CRL) and STOP with a named
           # reason if any is missing — osslsigncode hard-fails on an unreachable CDP, and a signed
           # artifact whose CRL is missing would fail verification everywhere.
           : > "$RUNNER_TEMP/crls.pem"; missing=""
@@ -190,8 +196,9 @@ jobs:
           done
           PKI=${CATBOY_PKI_BASE:-http://pki.catboy.systems}
           if [ -n "${CATBOY_TSA_URL:-}" ]; then
-            curl -sS -m 15 --fail "$PKI/certs/t1.crt" -o "$RUNNER_TEMP/t1.crt" 2>/dev/null || missing="$missing [T1 cert] $PKI/certs/t1.crt"
-            curl -sS -m 15 --fail "$PKI/crl/t1.crl"  -o "$RUNNER_TEMP/t1.crl" 2>/dev/null || missing="$missing [T1 CRL] $PKI/crl/t1.crl"
+            TSCA=${CATBOY_TIMESTAMP_CA_NAME:-t1}
+            curl -sS -m 15 --fail "$PKI/certs/$TSCA.crt" -o "$RUNNER_TEMP/tsca.crt" 2>/dev/null || missing="$missing [timestamp CA cert] $PKI/certs/$TSCA.crt"
+            curl -sS -m 15 --fail "$PKI/crl/$TSCA.crl"  -o "$RUNNER_TEMP/tsca.crl" 2>/dev/null || missing="$missing [timestamp CA CRL] $PKI/crl/$TSCA.crl"
           fi
           if [ -n "$missing" ]; then echo "reason=CRL not published for:$missing" >> "$GITHUB_OUTPUT"; echo "::error::CRL not published for:$missing"; exit 1; fi
           # mirror the leaf into CatCMDB so revocation-by-run is a lookup, not an enumeration
@@ -218,7 +225,7 @@ jobs:
           fail=0; signed=0; removed=0
           TS=(); [ -n "${CATBOY_TSA_URL:-}" ] && TS=(-ts "$CATBOY_TSA_URL") || echo "::warning::CATBOY_TSA_URL unset — signatures carry no timestamp and expire with the 1-hour leaf"
           CRL=(); [ -s "$RUNNER_TEMP/crls.pem" ] && CRL=(-CRLfile "$RUNNER_TEMP/crls.pem")
-          TSAV=(); [ -s "$RUNNER_TEMP/t1.crt" ] && TSAV=(-TSA-CAfile "$RUNNER_TEMP/t1.crt" -TSA-CRLfile "$RUNNER_TEMP/t1.crl")
+          TSAV=(); [ -s "$RUNNER_TEMP/tsca.crt" ] && TSAV=(-TSA-CAfile "$RUNNER_TEMP/tsca.crt" -TSA-CRLfile "$RUNNER_TEMP/tsca.crl")
           v=$(osslsigncode --version 2>&1 | grep -oE '[0-9]+\.[0-9]+' | head -1); [ "$(printf '%s\n2.13\n' "$v" | sort -V | head -1)" = "2.13" ] || echo "::warning::osslsigncode $v < 2.13 on this runner (memory-safety fixes); the runner image should carry >= 2.13"
           cat "$RUNNER_TEMP/sign.crt" "$RUNNER_TEMP/chain.pem" > "$RUNNER_TEMP/signchain.pem"
           { echo "# Signatures"; echo; echo "Signed by catboy.systems PKI for \`$GITHUB_REPOSITORY\` run $GITHUB_RUN_ID (leaf serial $LEAF_SERIAL)."; echo; echo '| file | sha256 | signature |'; echo '|---|---|---|'; } > dist/SIGNATURES.md
