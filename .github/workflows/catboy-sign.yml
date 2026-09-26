@@ -6,9 +6,13 @@
 # /pki/unsigned-release so a broken CA or runner binding raises a correlator event on the
 # first release, not after a quiet quarter. Gates:
 #   0 no CA configured on this runner (ubuntu-latest, or a runner without signing identity)
-#   1 login to OpenBao failed        2 run certificate not issued      3 signing tool/step failed
+#   1 no release tag (signing is for refs/tags/* only), or the OpenBao login failed
+#   2 run certificate not issued or not trusted: no pinned root in this version, the leaf chains
+#     to no pinned root, require-production on a staging root, or a CRL is not published
+#   3 signing tool/step failed
 #   4 signature did not verify — the signature is REMOVED, an unverifiable artifact never ships
 #   5 build artifact not available (the caller's upload failed, usually storage quota)
+#   6 bad CA routing value on the runner (mount, timestamp CA, runner issuer, login role prefix)
 #
 # IDENTITY IS TWO-PART (plan §6.7; DEVIATIONS D1 + D10 in polo-nyan/catboy-pki — no k8s in this fleet):
 #   repo    → the GitHub OIDC token of THIS run is the ISSUING login (audience
@@ -210,7 +214,7 @@ jobs:
           ROLE="run-${GITHUB_REPOSITORY_ID}-${CATBOY_RUNNER_ISSUER}"        # D10: keyed by the immutable repository id
           ISSUER="rp-${CATBOY_RUNNER_ISSUER}-${OWNER}-${REPO}-${YEAR}"
           # pins first: no key or certificate is minted when nothing could ever verify (review of #10, B)
-          mkdir -p "$RUNNER_TEMP/pins"; n=0; prod=0
+          rm -rf "$RUNNER_TEMP/pins"; mkdir -p "$RUNNER_TEMP/pins"; n=0; prod=0
           while read -r h b64; do
             [ -n "${h:-}" ] || continue
             case $h in production|staging) ;; *) echo "reason=bad pinned hierarchy '$h'" >> "$GITHUB_OUTPUT"; exit 1 ;; esac
@@ -227,6 +231,11 @@ jobs:
             > "$RUNNER_TEMP/cert.json"
           jq -er .data.certificate "$RUNNER_TEMP/cert.json" > "$RUNNER_TEMP/sign.crt"
           jq -er .data.private_key "$RUNNER_TEMP/cert.json" > "$RUNNER_TEMP/sign.key"
+          # exactly ONE leaf, and it must belong to the key we hold: a replayed public leaf followed by
+          # another cert could otherwise put a misleading hierarchy/fingerprint into CatCMDB (review of #10)
+          [ "$(grep -c -- '-----BEGIN CERTIFICATE-----' "$RUNNER_TEMP/sign.crt")" = 1 ] || { echo "reason=run certificate response holds more than one certificate" >> "$GITHUB_OUTPUT"; exit 1; }
+          [ "$(openssl x509 -in "$RUNNER_TEMP/sign.crt" -noout -pubkey | openssl pkey -pubin -outform DER | sha256sum)" = \
+            "$(openssl pkey -in "$RUNNER_TEMP/sign.key" -pubout -outform DER | sha256sum)" ] || { echo "reason=run certificate does not match the issued key" >> "$GITHUB_OUTPUT"; exit 1; }
           jq -er '.data.ca_chain[]' "$RUNNER_TEMP/cert.json" > "$RUNNER_TEMP/chain.pem"
           SERIAL=$(jq -er .data.serial_number "$RUNNER_TEMP/cert.json"); echo "serial=$SERIAL" >> "$GITHUB_OUTPUT"
           # the anchor is the ONE pinned root the leaf verifies to; each pin is tried alone, never the system store
