@@ -205,7 +205,11 @@ jobs:
           # env or system store can add an anchor. Changing this list is a new, reviewed tag
           # (orchestrator ruling 2026-09-26): v2.1.x pins the staging root R0 after its ceremony;
           # v2.2.0 adds the production root R1 at the R1 ceremony.
-          PINNED_ROOTS: ""
+          # staging: "Marc Schneider Root CA R0 (Staging)", DER SHA-256 ed5eaa1b7a66e154e8c82a3d45f65ddd36a3fbbad1f41a68d2bf4334ccc2d375,
+          #          valid until 2028-03-27; ceremony 2026-09-26 (polo-nyan/catboy-pki, docs/STAGING-R0.md). Every
+          #          signature under it reports hierarchy=staging; require-production refuses it.
+          PINNED_ROOTS: |
+            staging MIICKjCCAa+gAwIBAgIUT8cadL9dIOCutPqyErmy5d9FLl4wCgYIKoZIzj0EAwMwVDELMAkGA1UEBhMCREUxFzAVBgNVBAoMDk1hcmMgU2NobmVpZGVyMSwwKgYDVQQDDCNNYXJjIFNjaG5laWRlciBSb290IENBIFIwIChTdGFnaW5nKTAeFw0yNjA5MjYxMTA5MzZaFw0yODAzMjcxMTA5MzZaMFQxCzAJBgNVBAYTAkRFMRcwFQYDVQQKDA5NYXJjIFNjaG5laWRlcjEsMCoGA1UEAwwjTWFyYyBTY2huZWlkZXIgUm9vdCBDQSBSMCAoU3RhZ2luZykwdjAQBgcqhkjOPQIBBgUrgQQAIgNiAARidosjyErQ9zL4JjFi0NEnMPpVs/gkpmsMyxi4+fRbD1Bh356QKLFD+1LMNts4qmzDDvoDSeE1GdAVGwhnrp8vg3qO6G0YwNAKooSN639CLG798ReUoyv6rAPq4ldE7I+jQjBAMA8GA1UdEwEB/wQFMAMBAf8wDgYDVR0PAQH/BAQDAgEGMB0GA1UdDgQWBBSb4GvVCgG+zkMzzretZkPgtoscCDAKBggqhkjOPQQDAwNpADBmAjEAo7lcRCJPo9Yst/1DaVKg/T/8k+ULAkGgU31UWzKUzxB2/mRsFMApIQ9JvkujYW3/AjEA+QC9bLkJIgpnDSf9zTQngsllncueciWk1wX2dKUWn2NymavnCmHJ3cArxt3nUq8Y
         run: |
           set -euo pipefail
           umask 077
