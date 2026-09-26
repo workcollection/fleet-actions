@@ -74,6 +74,7 @@ build, where `php: command not found` reads like the repo's own bug.
 | `security-scan.yml` | 54 copies / 50 versions. Runner is now an input. |
 | `dependabot-auto-merge.yml` | 43 copies / 36 versions. Branch filter and merge method are now inputs. |
 | `fleet-check.yml` | Out-of-band Python hygiene scans — drift now fails a PR instead of surfacing weeks later. |
+| `catboy-sign.yml` | Nothing (no fleet repo signed releases before). Authenticode + detached CMS with the catboy.systems PKI, fail-open, plus a GitHub attestation. See below. |
 
 ```yaml
 jobs:
@@ -136,6 +137,34 @@ jobs:
 `templates/SECURITY.md` is the fleet policy template. An organisation ships one
 copy in its `.github` repository and every repo inherits it; a user account has no
 such default, so each of its public repos carries the file.
+
+## Code signing: `catboy-sign.yml`
+
+Signs release artifacts with the catboy.systems PKI (a 1-hour per-run certificate under a
+per-runner, per-repo CA; design in `polo-nyan/catboy-pki`). **Fail-open, never silent**:
+the job exits 0 on every path, but an unsigned outcome is a `::warning`, `signed=false` +
+`gate=<n>` in the outputs, and a POST to CatCMDB that raises an alert. `ubuntu-latest`
+has no signing identity and takes gate 0 by design; the fleet runners carry theirs in
+their environment (set by CatCMDB, never in the workflow). The caller uploads its build
+output as an artifact and attaches the `-signed` copy to the release:
+
+```yaml
+jobs:
+  build:   # … uploads dist/ as artifact "binaries"
+  sign:
+    needs: build
+    uses: workcollection/fleet-actions/.github/workflows/catboy-sign.yml@v2.1.0
+    with: { artifact-name: binaries, runs-on: self-hosted }
+  release:
+    needs: sign
+    steps:
+      - uses: actions/download-artifact@…
+        with: { name: ${{ needs.sign.outputs.artifact }}, path: out }
+```
+
+The repo identity is this run's GitHub OIDC token, which the CA binds to
+**this file at a `v2.*` tag** (`job_workflow_ref`), never to a branch — which is why the
+immutable-tag ruleset matters for this workflow more than for any other.
 
 ## Migrating a repo
 
