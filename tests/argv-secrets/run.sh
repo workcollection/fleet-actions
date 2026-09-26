@@ -38,6 +38,9 @@ for i in 2 3 5 8; do
   set -a; . rt/env 2>/dev/null; set +a      # what GitHub does with GITHUB_ENV between steps
   strace -f -qq -e trace=execve -s 100000 -o trace.$i bash --noprofile --norc -eo pipefail step$i.sh > rt/log.$i 2>&1; echo "step $i exit $?  ($(grep -c execve trace.$i) execs)"
 done
+# step 8 again for a caller without id-token: write: it must still report, just without X-GitHub-OIDC
+env -u ACTIONS_ID_TOKEN_REQUEST_URL -u ACTIONS_ID_TOKEN_REQUEST_TOKEN strace -f -qq -e trace=execve -s 100000 -o trace.8b \
+  bash --noprofile --norc -eo pipefail step8.sh > rt/log.8b 2>&1; echo "step 8 (no id-token) exit $?"
 kill $STUB
 echo "== secrets on ANY execve argv (all processes, all steps):"
 for k in $(python3 -c "import json;print(' '.join(json.load(open('secrets.json'))))"); do
