@@ -406,11 +406,20 @@ jobs:
             echo "::warning::release NOT signed by catboy.systems (gate $gate: $reason)"
             { echo "## catboy-sign: NOT signed ⚠️ (gate $gate)"; echo; echo "$reason"; echo; echo 'The release ships unsigned but attested; the event is recorded in CatCMDB.'; } >> "$GITHUB_STEP_SUMMARY"
             CT=${CATCMDB_TOKEN:-}; if [ -n "${CATCMDB_TOKEN_FILE:-}" ] && [ -r "$CATCMDB_TOKEN_FILE" ]; then CT=$(<"$CATCMDB_TOKEN_FILE"); fi; [ -z "$CT" ] || echo "::add-mask::$CT"   # file wins, like the secret_id
+            # CatCMDB binds `repo` to the verified claims of its own-audience OIDC token (best effort:
+            # a caller without id-token: write still reports, CatCMDB treats the header as optional for now)
+            CJWT=""
+            if [ -n "$CT" ] && [ -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ] && [ -n "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" ]; then
+              CJWT=$(curl -sS -m 15 -H @<(printf 'Authorization: bearer %s\n' "$ACTIONS_ID_TOKEN_REQUEST_TOKEN") "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=https://catcmdb.catboy.systems/pki" | jq -er .value) || CJWT=""
+              [ -z "$CJWT" ] || echo "::add-mask::$CJWT"
+            fi
             if [ -n "${CATCMDB_URL:-}" ] && [ -n "$CT" ]; then
               jq -n --arg repo "$GITHUB_REPOSITORY" --arg run_id "$GITHUB_RUN_ID" --arg gate "$gate" --arg reason "$reason" --arg runner "${RUNNER_NAME:-}" --arg wf "${GITHUB_WORKFLOW_REF:-}" --arg serial "${CERT_SERIAL:-}" \
-                 '{repo:$repo, run_id:$run_id, gate:($gate|tonumber), reason:$reason, runner:$runner, job_workflow_ref:$wf, serial:$serial}' \
-                | curl -sS -m 20 -o /dev/null -w 'unsigned-release: %{http_code}\n' -X POST "$CATCMDB_URL/api/v1/pki/unsigned-release" -H @<(printf 'Authorization: Bearer %s\n' "$CT") -H 'Content-Type: application/json' -d @- || true
+                 --arg rid "${GITHUB_REPOSITORY_ID:-}" \
+                 '{repo:$repo, repository_id:($rid|tonumber? // null), run_id:$run_id, gate:($gate|tonumber), reason:$reason, runner:$runner, job_workflow_ref:$wf, serial:$serial}' \
+                | curl -sS -m 20 -o /dev/null -w 'unsigned-release: %{http_code}\n' -X POST "$CATCMDB_URL/api/v1/pki/unsigned-release" \
+                    -H @<(printf 'Authorization: Bearer %s\n' "$CT"; [ -z "$CJWT" ] || printf 'X-GitHub-OIDC: %s\n' "$CJWT") -H 'Content-Type: application/json' -d @- || true
             fi
-            unset CT
+            unset CT CJWT
             if [ "$STRICT" = 'true' ]; then echo "::error::strict mode: unsigned release refused (gate $gate)"; exit 1; fi
           fi

@@ -7,7 +7,9 @@ class H(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         n = int(self.headers.get("Content-Length", 0) or 0); body = self.rfile.read(n).decode() if n else ""
         blob = str(dict(self.headers)) + body
-        seen.append({"path": self.path, "got": sorted(k for k, v in S.items() if v in blob)})
+        rec = {"path": self.path, "got": sorted(k for k, v in S.items() if v in blob)}
+        if "unsigned-release" in self.path: rec["repository_id"] = json.loads(body).get("repository_id")
+        seen.append(rec)
         json.dump(seen, open("seen.json", "w"))
         p = self.path
         if p.startswith("/crl/"):
