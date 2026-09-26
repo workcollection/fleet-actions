@@ -164,15 +164,16 @@ jobs:
           # repo identity = the issuing login. GitHub mints this token only inside THIS job, with this workflow ref.
           OIDC=$(curl -sS -H @<(printf 'Authorization: bearer %s\n' "$ACTIONS_ID_TOKEN_REQUEST_TOKEN") "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=https://ca.catboy.systems" | jq -er .value)
           echo "::add-mask::$OIDC"
-          RESP=$(curl -sS --fail-with-body "${CA_OPT[@]}" -X POST "$CATBOY_BAO_ADDR/v1/auth/jwt-github/login" \
-            -H 'Content-Type: application/json' -d "$(jq -n --arg role "${CATBOY_PKI_ROLE_PREFIX:-sign}-${GITHUB_REPOSITORY_OWNER}" --arg jwt "$OIDC" '{role:$role, jwt:$jwt}')")
+          # secrets reach jq through its environment (one call only) and curl through stdin, never argv
+          RESP=$(CB_ROLE="${CATBOY_PKI_ROLE_PREFIX:-sign}-${GITHUB_REPOSITORY_OWNER}" CB_JWT="$OIDC" jq -n '{role:$ENV.CB_ROLE, jwt:$ENV.CB_JWT}' \
+            | curl -sS --fail-with-body "${CA_OPT[@]}" -X POST "$CATBOY_BAO_ADDR/v1/auth/jwt-github/login" -H 'Content-Type: application/json' -d @-)
           TOKEN=$(jq -er .auth.client_token <<<"$RESP"); echo "::add-mask::$TOKEN"; echo "BAO_TOKEN=$TOKEN" >> "$GITHUB_ENV"   # revoked in the always-run cleanup
           unset OIDC   # the OpenBao-audience token never leaves this step (it would be an OpenBao login until it expires)
           echo "policies: $(jq -c .auth.token_policies <<<"$RESP")"
           # runner identity: proves "which runner" for ensure-repo-issuer only; missing = lazy creation impossible, not a failure here
           SID=${CATBOY_BAO_SECRET_ID:-}; [ -n "${CATBOY_BAO_SECRET_ID_FILE:-}" ] && [ -r "$CATBOY_BAO_SECRET_ID_FILE" ] && SID=$(cat "$CATBOY_BAO_SECRET_ID_FILE")
           if [ -n "${CATBOY_BAO_ROLE_ID:-}" ] && [ -n "$SID" ]; then
-            RT=$(jq -n --arg r "$CATBOY_BAO_ROLE_ID" --arg s "$SID" '{role_id:$r, secret_id:$s}' \
+            RT=$(CB_R="$CATBOY_BAO_ROLE_ID" CB_S="$SID" jq -n '{role_id:$ENV.CB_R, secret_id:$ENV.CB_S}' \
               | curl -sS --fail-with-body "${CA_OPT[@]}" -X POST "$CATBOY_BAO_ADDR/v1/auth/approle/login" -H 'Content-Type: application/json' -d @- \
               | jq -er .auth.client_token) || RT=
             if [ -n "$RT" ]; then echo "::add-mask::$RT"; else echo "::warning::runner AppRole login failed — existing pair roles still work, new ones cannot be created"; fi
@@ -193,7 +194,7 @@ jobs:
           fi
           unset CT
           # the runner token was only an identity proof: revoke it now
-          if [ -n "$RT" ]; then curl -sS -o /dev/null "${CA_OPT[@]}" -X POST -H "X-Vault-Token: $RT" "$CATBOY_BAO_ADDR/v1/auth/token/revoke-self" || true; fi
+          if [ -n "$RT" ]; then curl -sS -o /dev/null "${CA_OPT[@]}" -X POST -H @<(printf 'X-Vault-Token: %s\n' "$RT") "$CATBOY_BAO_ADDR/v1/auth/token/revoke-self" || true; fi
           unset RT
 
       - id: cert
@@ -232,7 +233,7 @@ jobs:
           if [ "$REQUIRE_PRODUCTION" = true ] && [ "$prod" = 0 ]; then echo "reason=require-production: this catboy-sign version pins no production root (nothing is issued)" >> "$GITHUB_OUTPUT"; echo "::error::require-production: no production root pinned"; exit 1; fi
           # D1/D10: issue through the PAIR ROLE with the OIDC-login token; its policy reaches only run-<own repository_id>-*
           curl -sS --fail-with-body "${CA_OPT[@]}" -X POST "$CATBOY_BAO_ADDR/v1/${CATBOY_PKI_CODESIGN_MOUNT:-pki-codesign}/issue/$ROLE" \
-            -H "X-Vault-Token: $BAO_TOKEN" -H 'Content-Type: application/json' \
+            -H @<(printf 'X-Vault-Token: %s\n' "$BAO_TOKEN") -H 'Content-Type: application/json' \
             -d "$(jq -n --arg cn "$GITHUB_REPOSITORY" --arg uris "https://github.com/$GITHUB_REPOSITORY,https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
                   '{common_name:$cn, ttl:"1h", uri_sans:$uris, private_key_format:"pkcs8"}')" \
             > "$RUNNER_TEMP/cert.json"
@@ -345,7 +346,7 @@ jobs:
           [ -f "$RUNNER_TEMP/sign.key" ] && (shred -u "$RUNNER_TEMP/sign.key" 2>/dev/null || rm -f "$RUNNER_TEMP/sign.key"); rm -f "$RUNNER_TEMP/cert.json"
           if [ -n "${BAO_TOKEN:-}" ] && [ -n "${CATBOY_BAO_ADDR:-}" ]; then
             read -r -a CA_OPT < "$RUNNER_TEMP/ca-opt" 2>/dev/null || CA_OPT=()
-            curl -sS -o /dev/null -w 'revoke OpenBao token: %{http_code}\n' "${CA_OPT[@]}" -X POST -H "X-Vault-Token: $BAO_TOKEN" "$CATBOY_BAO_ADDR/v1/auth/token/revoke-self" || true
+            curl -sS -o /dev/null -w 'revoke OpenBao token: %{http_code}\n' "${CA_OPT[@]}" -X POST -H @<(printf 'X-Vault-Token: %s\n' "$BAO_TOKEN") "$CATBOY_BAO_ADDR/v1/auth/token/revoke-self" || true
           fi
           true
 
