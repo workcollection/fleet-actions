@@ -39,7 +39,7 @@ for i in 2 3 5 8; do
   strace -f -qq -e trace=execve -s 100000 -o trace.$i bash --noprofile --norc -eo pipefail step$i.sh > rt/log.$i 2>&1; echo "step $i exit $?  ($(grep -c execve trace.$i) execs)"
 done
 # step 8 again for a caller without id-token: write: it must still report, just without X-GitHub-OIDC
-env -u ACTIONS_ID_TOKEN_REQUEST_URL -u ACTIONS_ID_TOKEN_REQUEST_TOKEN strace -f -qq -e trace=execve -s 100000 -o trace.8b \
+env -u ACTIONS_ID_TOKEN_REQUEST_URL -u ACTIONS_ID_TOKEN_REQUEST_TOKEN -u GITHUB_REPOSITORY_ID strace -f -qq -e trace=execve -s 100000 -o trace.8b \
   bash --noprofile --norc -eo pipefail step8.sh > rt/log.8b 2>&1; echo "step 8 (no id-token) exit $?"
 kill $STUB
 echo "== secrets on ANY execve argv (all processes, all steps):"
@@ -48,5 +48,5 @@ for k in $(python3 -c "import json;print(' '.join(json.load(open('secrets.json')
 echo "== processes exec'd:"; cat trace.* | grep -o 'execve("[^"]*' | sed 's/execve("//' | xargs -n1 basename | sort | uniq -c | sort -rn | head -20 | tr '\n' ' '; echo
 fail=$(for k in $(python3 -c "import json;print(' '.join(json.load(open('secrets.json'))))"); do cat trace.* | grep -c -F "$(S $k)"; done | awk "{s+=\$1} END{print s+0}")
 echo "== what the stub received (secret names per request):"; python3 -c "
-import json; [print('  ',r['path'][:60], r['got']) for r in json.load(open('seen.json'))]"
+import json; [print('  ',r['path'][:60], r['got'], *(['repository_id=%r' % r['repository_id']] if 'repository_id' in r else [])) for r in json.load(open('seen.json'))]"
 echo "TOTAL secret occurrences on argv: $fail"; [ "$fail" = 0 ]

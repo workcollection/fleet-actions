@@ -415,7 +415,8 @@ jobs:
             fi
             if [ -n "${CATCMDB_URL:-}" ] && [ -n "$CT" ]; then
               jq -n --arg repo "$GITHUB_REPOSITORY" --arg run_id "$GITHUB_RUN_ID" --arg gate "$gate" --arg reason "$reason" --arg runner "${RUNNER_NAME:-}" --arg wf "${GITHUB_WORKFLOW_REF:-}" --arg serial "${CERT_SERIAL:-}" \
-                 '{repo:$repo, run_id:$run_id, gate:($gate|tonumber), reason:$reason, runner:$runner, job_workflow_ref:$wf, serial:$serial}' \
+                 --arg rid "${GITHUB_REPOSITORY_ID:-}" \
+                 '{repo:$repo, repository_id:($rid|tonumber? // null), run_id:$run_id, gate:($gate|tonumber), reason:$reason, runner:$runner, job_workflow_ref:$wf, serial:$serial}' \
                 | curl -sS -m 20 -o /dev/null -w 'unsigned-release: %{http_code}\n' -X POST "$CATCMDB_URL/api/v1/pki/unsigned-release" \
                     -H @<(printf 'Authorization: Bearer %s\n' "$CT"; [ -z "$CJWT" ] || printf 'X-GitHub-OIDC: %s\n' "$CJWT") -H 'Content-Type: application/json' -d @- || true
             fi
