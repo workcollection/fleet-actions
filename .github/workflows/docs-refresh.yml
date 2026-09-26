@@ -1,0 +1,64 @@
+# .github/workflows/docs-refresh.yml — Phase 2 of the autowiki rework.
+# Regenerates the committed .claude/** discovery copy AFTER a merge to the default branch,
+# then commits it back with [skip ci] so it cannot retrigger CI. Feature branches are never
+# touched (local sessions keep their own out-of-repo cache — Phase 1).
+#
+# Tooling source = smol-kitten/pawkit-docgen (PUBLIC mirror of pawkit's deterministic generator
+# closure — no PAT, no private-content exposure). Kept in sync by pawkit's docgen_sync.py.
+#
+# Prereqs / canary checklist (verify on the FIRST repo before rolling out):
+#   [ ] repo default branch is UNPROTECTED (or the bot can bypass) — a protected main will
+#       reject the push; those repos stay Phase-1-only until a bypassing app/token is wired.
+#   [ ] runner label matches (smol-kitten ARC = [self-hosted, linux]).
+#   [ ] runner has git, python3, and network to clone the public mirror + pip.
+#   [ ] confirm the [skip ci] commit does NOT spawn a second run (watch the Actions tab).
+# Tooling home is set to runner.temp (writable) so the runner never needs to create /home/claude.
+name: docs-refresh
+on:
+  schedule:
+    - cron: '30 3 * * *'         # daily floor — see the concurrency note below
+  workflow_dispatch:
+  push:
+    branches: [main]              # default branch only; adjust per-repo if master
+    paths-ignore:
+      - '.claude/**'              # belt-and-suspenders: a docs-only commit can't trigger us
+      - 'AGENTS.md'
+permissions:
+  contents: write                 # to push the refresh commit back
+concurrency:
+  group: docs-refresh-${{ github.ref }}
+  # NOT cancel-in-progress. With push-only triggering, cancel-in-progress means a BUSY repo
+  # never refreshes its docs at all: each push cancels the run the previous push started, so
+  # the job is perpetually cancelled and the artifact is never produced. Measured 2026-08-24 —
+  # 4 of the last 5 runs cancelled, and the committed .claude/symbols.json was 13 DAYS stale
+  # while GitHub showed the workflow "running". A cancelled run is not a failed run, so nothing
+  # alerts. Queueing is the right trade here: the job is idempotent (it regenerates from HEAD),
+  # so a short backlog is harmless and completion is what actually matters.
+  cancel-in-progress: false
+jobs:
+  refresh:
+    # primary no-loop guard: skip if the head commit is our own refresh
+    if: ${{ !contains(github.event.head_commit.message, '[skip ci]') }}
+    runs-on: [self-hosted, linux]
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # full history so incremental symbol index + patchnotes work
+      - name: Checkout tooling (smol-kitten/pawkit-docgen — PUBLIC, no token needed)
+        uses: actions/checkout@v4
+        with:
+          repository: smol-kitten/pawkit-docgen
+          path: .tooling
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install tooling deps
+        run: pip install -r .tooling/requirements.txt
+      - name: Regenerate + publish discovery copy
+        env:
+          TOOLING_SRC: .tooling
+          CLAUDE_MEMORY_HOME: ${{ runner.temp }}/claude-memory   # writable; no need for /home/claude
+        # ci-docs-publish.sh is shipped in the public mirror root (synced from pawkit deploy/).
+        run: bash .tooling/ci-docs-publish.sh
