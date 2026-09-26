@@ -24,7 +24,10 @@
 #   CATBOY_PKI_BASE (default http://pki.catboy.systems)  CATBOY_ROOT_B64 (root PEM, base64; else fetched)
 #   CA generation (routing only, so a tag never names a CA; OpenBao policy is the gate):
 #   CATBOY_PKI_CODESIGN_MOUNT (default pki-codesign)  CATBOY_ROOT_NAME (default r1)
-#   CATBOY_TIMESTAMP_CA_NAME (default t1). Staging R0: pki-stg-codesign / r0 / t0.
+#   CATBOY_TIMESTAMP_CA_NAME (default t1)  CATBOY_PKI_ROLE_PREFIX (default sign → login role sign-<owner>).
+#   Staging R0: pki-stg-codesign / r0 / t0 / sign-stg. The caller picks the runner (runs-on), so
+#   routing is NOT trust: OpenBao binds each generation's login role to its own mount (catboy-pki
+#   D16), and the HIERARCHY is decided here from PINNED root fingerprints, never from runner env.
 #   CATCMDB_URL + CATCMDB_TOKEN (scoped: ensure-repo-issuer, certificates/import, pki/unsigned-release)
 #   CATCMDB_OIDC_AUDIENCE (default https://catcmdb.catboy.systems/pki): CatCMDB's own OIDC token, never the OpenBao one
 #
@@ -64,6 +67,11 @@ on:
         type: boolean
         required: false
         default: false
+      require-production:
+        description: 'Refuse any signature that does not chain to a pinned PRODUCTION root (a real release). v2.1.x pins only the staging root, so this always refuses there.'
+        type: boolean
+        required: false
+        default: false
     outputs:
       signed:
         description: 'true when every requested file was signed AND verified'
@@ -74,6 +82,12 @@ on:
       artifact:
         description: 'name of the artifact that carries the (signed or unsigned) files'
         value: ${{ jobs.sign.outputs.artifact }}
+      hierarchy:
+        description: 'production | staging, from the pinned root fingerprint (empty when not signed)'
+        value: ${{ jobs.sign.outputs.hierarchy }}
+      root-fingerprint:
+        description: 'SHA-256 of the root the signature chains to (lowercase hex)'
+        value: ${{ jobs.sign.outputs.root-fingerprint }}
 
 permissions:
   contents: read
@@ -90,6 +104,8 @@ jobs:
       signed: ${{ steps.report.outputs.signed }}
       gate: ${{ steps.report.outputs.gate }}
       artifact: ${{ steps.report.outputs.artifact }}
+      hierarchy: ${{ steps.report.outputs.hierarchy }}
+      root-fingerprint: ${{ steps.report.outputs.root-fingerprint }}
     steps:
       - id: fetch
         name: Build artifact
@@ -117,6 +133,11 @@ jobs:
             # path segments only: curl collapses ../ into another mount (review of #10, verified)
             [[ $v =~ ^[a-z0-9][a-z0-9-]{0,62}$ ]] || { echo "gate=6" >> "$GITHUB_OUTPUT"; echo "reason=bad CA routing value on runner ${RUNNER_NAME:-?}" >> "$GITHUB_OUTPUT"; exit 0; }
           done
+          [[ ${CATBOY_PKI_ROLE_PREFIX:-sign} =~ ^sign(-[a-z0-9]+)?$ ]] || { echo "gate=6" >> "$GITHUB_OUTPUT"; echo "reason=bad CATBOY_PKI_ROLE_PREFIX on runner ${RUNNER_NAME:-?}" >> "$GITHUB_OUTPUT"; exit 0; }
+          case "$GITHUB_REF" in
+            refs/tags/*) ;;
+            *) echo "gate=1" >> "$GITHUB_OUTPUT"; echo "reason=catboy-sign signs release tags only (this run: $GITHUB_REF). The OpenBao login role binds ref refs/tags/*, so a branch or PR build cannot sign." >> "$GITHUB_OUTPUT"; exit 0 ;;
+          esac
           if [ -n "${CATBOY_ROOT_B64:-}" ] && [ -n "${CATBOY_ROOT_NAME:-}" ]; then echo "::warning::CATBOY_ROOT_B64 and CATBOY_ROOT_NAME are both set on runner ${RUNNER_NAME:-?}; CATBOY_ROOT_B64 wins"; fi
           for t in curl jq openssl; do command -v "$t" >/dev/null || { echo "gate=3" >> "$GITHUB_OUTPUT"; echo "reason=missing tool $t" >> "$GITHUB_OUTPUT"; exit 0; }; done
           if ! command -v osslsigncode >/dev/null; then
@@ -139,7 +160,7 @@ jobs:
           OIDC=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=https://ca.catboy.systems" | jq -er .value)
           echo "::add-mask::$OIDC"
           RESP=$(curl -sS --fail-with-body "${CA_OPT[@]}" -X POST "$CATBOY_BAO_ADDR/v1/auth/jwt-github/login" \
-            -H 'Content-Type: application/json' -d "{\"role\":\"sign-${GITHUB_REPOSITORY_OWNER}\",\"jwt\":\"$OIDC\"}")
+            -H 'Content-Type: application/json' -d "$(jq -n --arg role "${CATBOY_PKI_ROLE_PREFIX:-sign}-${GITHUB_REPOSITORY_OWNER}" --arg jwt "$OIDC" '{role:$role, jwt:$jwt}')")
           TOKEN=$(jq -er .auth.client_token <<<"$RESP"); echo "::add-mask::$TOKEN"; echo "BAO_TOKEN=$TOKEN" >> "$GITHUB_ENV"   # revoked in the always-run cleanup
           unset OIDC   # the OpenBao-audience token never leaves this step (it would be an OpenBao login until it expires)
           echo "policies: $(jq -c .auth.token_policies <<<"$RESP")"
@@ -173,6 +194,12 @@ jobs:
         if: steps.gate0.outputs.gate == '' && steps.login.outcome == 'success'
         continue-on-error: true
         shell: bash
+        env:
+          REQUIRE_PRODUCTION: ${{ inputs.require-production }}
+          # PINNED TRUST ANCHORS: "<hierarchy> <sha256 of the root cert, lowercase hex>" per line.
+          # Changing this list is a new, reviewed tag (orchestrator ruling 2026-09-26): v2.1.x pins the
+          # staging root R0 after its ceremony; v2.2.0 adds the production root R1 at the R1 ceremony.
+          PINNED_ROOTS: ""
         run: |
           set -euo pipefail
           umask 077
@@ -194,6 +221,13 @@ jobs:
           if [ -n "${CATBOY_ROOT_B64:-}" ]; then echo "$CATBOY_ROOT_B64" | base64 -d > "$RUNNER_TEMP/root.crt"
           else curl -sS -m 20 --fail "${CATBOY_PKI_BASE:-http://pki.catboy.systems}/certs/${CATBOY_ROOT_NAME:-r1}.crt" -o "$RUNNER_TEMP/root.crt"; fi
           openssl verify -CAfile "$RUNNER_TEMP/root.crt" -untrusted "$RUNNER_TEMP/chain.pem" "$RUNNER_TEMP/sign.crt" >/dev/null
+          # the root came from runner env or an http fetch: it counts only if its fingerprint is PINNED here
+          RFP=$(openssl x509 -in "$RUNNER_TEMP/root.crt" -noout -fingerprint -sha256 | cut -d= -f2 | tr -d : | tr 'A-F' 'a-f')
+          HIER=$(awk -v f="$RFP" '$2==f {print $1; exit}' <<<"$PINNED_ROOTS")
+          echo "root-fingerprint=$RFP" >> "$GITHUB_OUTPUT"
+          if [ -z "$HIER" ]; then echo "reason=trust anchor $RFP is not pinned in this catboy-sign version" >> "$GITHUB_OUTPUT"; echo "::error::root $RFP is not a pinned catboy root"; exit 1; fi
+          echo "hierarchy=$HIER" >> "$GITHUB_OUTPUT"
+          if [ "$REQUIRE_PRODUCTION" = true ] && [ "$HIER" != production ]; then echo "reason=require-production: this run chains to the $HIER root" >> "$GITHUB_OUTPUT"; echo "::error::require-production: $HIER signature refused"; exit 1; fi
           # HARD GATE (catboy-pki G-CRL): every CRL a verifier will fetch must already be published.
           # Fetch each chain cert's CDP plus the TSA chain (timestamp CA cert + CRL) and STOP with a named
           # reason if any is missing — osslsigncode hard-fails on an unreachable CDP, and a signed
@@ -220,7 +254,8 @@ jobs:
           if [ -n "${CATCMDB_URL:-}" ] && [ -n "${CATCMDB_TOKEN:-}" ]; then
             jq -n --arg cert "$(cat "$RUNNER_TEMP/sign.crt")" --arg chain "$(cat "$RUNNER_TEMP/chain.pem")" --arg issuer "$ISSUER" \
                   --arg runner "$CATBOY_RUNNER_ISSUER" --arg run_id "$GITHUB_RUN_ID" --arg sha "$GITHUB_SHA" --arg ref "$GITHUB_REF" --arg wf "${GITHUB_WORKFLOW_REF:-}" \
-                  '{certificate:$cert, chain:$chain, issuer:$issuer, runner:$runner, run_id:$run_id, sha:$sha, ref:$ref, job_workflow_ref:$wf}' \
+                  --arg hier "$HIER" --arg rfp "$RFP" \
+                  '{certificate:$cert, chain:$chain, issuer:$issuer, runner:$runner, run_id:$run_id, sha:$sha, ref:$ref, job_workflow_ref:$wf, hierarchy:$hier, root_fingerprint:$rfp}' \
               | curl -sS -m 30 -o /dev/null -w 'certificates/import: %{http_code}\n' -X POST "$CATCMDB_URL/api/v1/certificates/import" \
                   -H "Authorization: Bearer $CATCMDB_TOKEN" -H 'Content-Type: application/json' -d @- || true
           fi
@@ -233,6 +268,8 @@ jobs:
         shell: bash
         env:
           LEAF_SERIAL: ${{ steps.cert.outputs.serial }}
+          HIERARCHY: ${{ steps.cert.outputs.hierarchy }}
+          ROOT_FP: ${{ steps.cert.outputs.root-fingerprint }}
           PE_GLOB: ${{ inputs.pe-glob }}
           ARCHIVE_GLOB: ${{ inputs.archive-glob }}
         run: |
@@ -243,7 +280,7 @@ jobs:
           TSAV=(); [ -s "$RUNNER_TEMP/tsca.crt" ] && TSAV=(-TSA-CAfile "$RUNNER_TEMP/tsca.crt" -TSA-CRLfile "$RUNNER_TEMP/tsca.crl")
           v=$(osslsigncode --version 2>&1 | grep -oE '[0-9]+\.[0-9]+' | head -1); [ "$(printf '%s\n2.13\n' "$v" | sort -V | head -1)" = "2.13" ] || echo "::warning::osslsigncode $v < 2.13 on this runner (memory-safety fixes); the runner image should carry >= 2.13"
           cat "$RUNNER_TEMP/sign.crt" "$RUNNER_TEMP/chain.pem" > "$RUNNER_TEMP/signchain.pem"
-          { echo "# Signatures"; echo; echo "Signed by catboy.systems PKI for \`$GITHUB_REPOSITORY\` run $GITHUB_RUN_ID (leaf serial $LEAF_SERIAL)."; echo; echo '| file | sha256 | signature |'; echo '|---|---|---|'; } > dist/SIGNATURES.md
+          { echo "# Signatures"; echo; echo "Signed by catboy.systems PKI (**$HIERARCHY** hierarchy, root SHA-256 \`$ROOT_FP\`) for \`$GITHUB_REPOSITORY\` run $GITHUB_RUN_ID (leaf serial $LEAF_SERIAL)."; echo; echo '| file | sha256 | signature |'; echo '|---|---|---|'; } > dist/SIGNATURES.md
           # shellcheck disable=SC2086
           find_args() { local first=1; for p in $1; do [ $first = 1 ] || printf ' -o'; printf ' -name %q' "$p"; first=0; done; }
           while IFS= read -r -d '' f; do
@@ -306,6 +343,8 @@ jobs:
           CERT_OUTCOME: ${{ steps.cert.outcome }}
           CERT_REASON: ${{ steps.cert.outputs.reason }}
           CERT_SERIAL: ${{ steps.cert.outputs.serial }}
+          HIERARCHY: ${{ steps.cert.outputs.hierarchy }}
+          ROOT_FP: ${{ steps.cert.outputs.root-fingerprint }}
           SIGN_OUTCOME: ${{ steps.sign.outcome }}
           SIGN_GATE: ${{ steps.sign.outputs.gate }}
           SIGN_COUNTS: ${{ steps.sign.outputs.counts }}
@@ -316,7 +355,7 @@ jobs:
           set -uo pipefail
           gate=$G0_GATE; reason=$G0_REASON
           if [ -z "$gate" ]; then
-            if [ "$LOGIN_OUTCOME" != 'success' ]; then gate=1; reason='OpenBao login with the run OIDC token failed (role sign-<owner>, tagged workflow ref required)'
+            if [ "$LOGIN_OUTCOME" != 'success' ]; then gate=1; reason='OpenBao login with the run OIDC token failed (role <prefix>-<owner>: tagged fleet workflow and a release-tag ref required)'
             elif [ "$CERT_OUTCOME" != 'success' ]; then gate=2; reason=${CERT_REASON:-'run certificate not issued'}
             elif [ "$SIGN_OUTCOME" != 'success' ]; then gate=${SIGN_GATE:-3}; reason="signing failed (signed/failed/removed: $SIGN_COUNTS)"
             fi
@@ -324,8 +363,8 @@ jobs:
           art=$ARTIFACT_NAME; [ "$UPLOAD_OUTCOME" = 'success' ] && art="${art}-signed"
           echo "artifact=$art" >> "$GITHUB_OUTPUT"
           if [ -z "$gate" ]; then
-            echo "signed=true" >> "$GITHUB_OUTPUT"; echo "gate=" >> "$GITHUB_OUTPUT"
-            { echo '## catboy-sign: signed ✅'; echo; echo "runner issuer \`rn-${CATBOY_RUNNER_ISSUER:-?}\`, leaf serial \`$CERT_SERIAL\`, files signed/failed/removed: \`$SIGN_COUNTS\`"; echo; echo 'Verify: https://pki.catboy.systems/verify'; } >> "$GITHUB_STEP_SUMMARY"
+            { echo "signed=true"; echo "gate="; echo "hierarchy=$HIERARCHY"; echo "root-fingerprint=$ROOT_FP"; } >> "$GITHUB_OUTPUT"
+            { echo "## catboy-sign: signed ✅ ($HIERARCHY)"; echo; echo "hierarchy **$HIERARCHY**, root SHA-256 \`$ROOT_FP\`"; echo; echo "runner issuer \`rn-${CATBOY_RUNNER_ISSUER:-?}\`, leaf serial \`$CERT_SERIAL\`, files signed/failed/removed: \`$SIGN_COUNTS\`"; echo; echo 'Verify: https://pki.catboy.systems/verify'; } >> "$GITHUB_STEP_SUMMARY"
           else
             echo "signed=false" >> "$GITHUB_OUTPUT"; echo "gate=$gate" >> "$GITHUB_OUTPUT"
             echo "::warning::release NOT signed by catboy.systems (gate $gate: $reason)"
