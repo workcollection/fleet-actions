@@ -153,7 +153,7 @@ jobs:
   build:   # … uploads dist/ as artifact "binaries"
   sign:
     needs: build
-    uses: workcollection/fleet-actions/.github/workflows/catboy-sign.yml@v2.1.0
+    uses: workcollection/fleet-actions/.github/workflows/catboy-sign.yml@v2.1.4
     with: { artifact-name: binaries, runs-on: self-hosted }
   release:
     needs: sign
@@ -165,6 +165,25 @@ jobs:
 The repo identity is this run's GitHub OIDC token, which the CA binds to
 **this file at a `v2.*` tag** (`job_workflow_ref`), never to a branch — which is why the
 immutable-tag ruleset matters for this workflow more than for any other.
+
+**Verifying a signed release** (staging or production root; get `r0.crt`/`r1.crt`, `t0.crt`
+and `cb0.crt` from `http://pki.catboy.systems/certs/`, and check the root's SHA-256 against the
+`hierarchy`/`root-fingerprint` outputs and `SIGNATURES.md`):
+
+```sh
+# Windows binaries: Authenticode + its RFC 3161 timestamp (checked at the timestamp time, CRLs fetched)
+cat r0.crt cb0.crt t0.crt > tsa-ca.pem
+osslsigncode verify -in app.exe -CAfile r0.crt -TSA-CAfile tsa-ca.pem
+
+# Archives: detached CMS, then the RFC 3161 token over the signature bytes (.p7s.tsr, since v2.1.4)
+openssl cms -verify -binary -inform DER -in app.zip.p7s -content app.zip -CAfile r0.crt \
+  -no-CApath -no-CAstore -purpose any -attime "$(date -d "$(openssl ts -reply -in app.zip.p7s.tsr -text | sed -n 's/^Time stamp: //p')" +%s)" -out /dev/null
+cat t0.crt cb0.crt > tsa-untrusted.pem
+openssl ts -verify -data app.zip.p7s -in app.zip.p7s.tsr -CAfile r0.crt -untrusted tsa-untrusted.pem
+```
+
+The `.p7s` is signed by a 1-hour certificate. The timestamp token is what keeps it valid
+afterwards: verify the CMS at the token's `Time stamp`, then verify the token itself.
 
 ## Migrating a repo
 
