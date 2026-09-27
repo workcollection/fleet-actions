@@ -27,7 +27,7 @@ class H(http.server.BaseHTTPRequestHandler):
         if p.endswith("/auth/jwt-github/login"): return self._r(200, {"auth": {"client_token": S["BAO_TOKEN"], "token_policies": ["sign-by-repo-id-stg"]}})
         if p.endswith("/auth/approle/login"): return self._r(200, {"auth": {"client_token": S["RUNNER_TOKEN"]}})
         if p.endswith("/pki/ensure-repo-issuer"): return self._r(int(os.environ.get("STUB_ERI_CODE", "200")), {})
-        if "/issue/" in p: return self._r(200, {"data": {"certificate": P["leaf"], "private_key": P["key"], "ca_chain": [P["root"]], "serial_number": "01:02"}})
+        if "/issue/" in p: return self._r(200, {"data": {"certificate": P["leaf"], "private_key": P["key"], "ca_chain": P["chain"], "serial_number": "01:02"}})
         return self._r(200, {})
     def log_message(self, *a): pass
 # plain HTTP for OIDC/CatCMDB/CRL, HTTPS (throwaway TLS CA, like the real runners' CACERT_B64) for OpenBao
