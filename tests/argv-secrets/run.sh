@@ -27,8 +27,13 @@ k() { openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -keyout "$1
 ca_ext='basicConstraints=critical,CA:TRUE\nkeyUsage=critical,keyCertSign,cRLSign\n'
 k root; openssl x509 -req -in root.csr -key root.key -out root.pem -days 2 -extfile <(printf "$ca_ext") 2>/dev/null
 k int; openssl x509 -req -in int.csr -CA root.pem -CAkey root.key -CAcreateserial -out int.pem -days 1 -extfile int.ext 2>/dev/null
-k leaf; openssl x509 -req -in leaf.csr -CA int.pem -CAkey int.key -CAcreateserial -out leaf.pem -days 1 -extfile leaf.ext 2>/dev/null
-k t0; openssl x509 -req -in t0.csr -CA root.pem -CAkey root.key -CAcreateserial -out t0.pem -days 1 -extfile <(printf "$ca_ext") 2>/dev/null
+# a runner CA under the intermediate, like the real rn-* under CS0/CB0: ca_chain then holds >= 2 PEM certs,
+# which is what made OpenSSL 3.0 drop certs from a DER+PEM bundle (a DER cert + ONE PEM cert still parses)
+k rn; openssl x509 -req -in rn.csr -CA int.pem -CAkey int.key -CAcreateserial -out rn.pem -days 1 -extfile int.ext 2>/dev/null
+k leaf; openssl x509 -req -in leaf.csr -CA rn.pem -CAkey rn.key -CAcreateserial -out leaf.pem -days 1 -extfile leaf.ext 2>/dev/null
+# T0 under the intermediate, like the real T0 under CB0: the TSA chain then NEEDS both certs from -untrusted
+# (with T0 directly under the root, OpenSSL 3.0 read the first DER cert of a mixed bundle and still passed)
+k t0; openssl x509 -req -in t0.csr -CA int.pem -CAkey int.key -CAcreateserial -out t0.pem -days 1 -extfile <(printf "$ca_ext") 2>/dev/null
 k tsa; openssl x509 -req -in tsa.csr -CA t0.pem -CAkey t0.key -CAcreateserial -out tsa.pem -days 1 -extfile <(printf 'extendedKeyUsage=critical,timeStamping\nkeyUsage=critical,digitalSignature\n') 2>/dev/null
 openssl x509 -in t0.pem -outform DER -out t0.der   # pki-web serves DER
 openssl ca -config cat0.cnf -gencrl -keyfile t0.key -cert t0.pem -out t0.crl.pem 2>/dev/null; openssl crl -in t0.crl.pem -outform DER -out t0.crl
@@ -40,7 +45,7 @@ openssl ca -config ca.cnf -gencrl -keyfile int.key -cert int.pem -out x.crl.pem 
 python3 -c "
 import json, secrets
 json.dump({k: 'SECRET' + k + secrets.token_hex(8) for k in ['OIDC_JWT','BAO_TOKEN','RUNNER_TOKEN','SECRET_ID','CATCMDB_TOKEN','ID_REQ_TOKEN']}, open('secrets.json','w'))
-json.dump({'root': open('int.pem').read(), 'leaf': open('leaf.pem').read(), 'key': open('leaf.key').read()}, open('pki.json','w'))"
+json.dump({'chain': [open('rn.pem').read(), open('int.pem').read()], 'leaf': open('leaf.pem').read(), 'key': open('leaf.key').read()}, open('pki.json','w'))"
 S() { python3 -c "import json;print(json.load(open('secrets.json'))['$1'])"; }
 
 setup_rt() {   # a fresh RUNNER_TEMP + GITHUB_ENV + dist/ for one pass
@@ -90,7 +95,7 @@ badua=$(python3 -c "import json; print(sum(1 for r in json.load(open('seen1.json
 chk "every request carries the catboy-sign User-Agent ($badua without)" '[ "$badua" = 0 ]'
 chk "sign step: signed=1 failed=0 removed=0" 'grep -q "signed=1 failed=0 removed=0" rt/log.4'
 chk "empty pe-glob skipped (no find error)" '! grep -q "empty parentheses" rt/log.4'
-chk "e2e.tar.gz.p7s.tsr verifies to the root" 'cat t0.pem int.pem > tsa-untr.pem; openssl ts -verify -data dist1/e2e.tar.gz.p7s -in dist1/e2e.tar.gz.p7s.tsr -CAfile root.pem -untrusted tsa-untr.pem >/dev/null 2>&1'
+chk "e2e.tar.gz.p7s.tsr verifies to the root" 'cat t0.pem rn.pem int.pem > tsa-untr.pem; openssl ts -verify -data dist1/e2e.tar.gz.p7s -in dist1/e2e.tar.gz.p7s.tsr -CAfile root.pem -untrusted tsa-untr.pem >/dev/null 2>&1'
 chk "SIGNATURES.md names the .tsr" 'grep -q "e2e.tar.gz.p7s.tsr" dist1/SIGNATURES.md'
 # pki-web serves DER: bundles fed to `openssl ts -verify -untrusted` / -TSA-CAfile must be pure PEM with every
 # cert in them. OpenSSL 3.0 (the runners' Ubuntu Noble) cannot read a DER cert cat'ed into a PEM bundle; newer
