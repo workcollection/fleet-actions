@@ -300,6 +300,7 @@ jobs:
           }
           # a repo issuer created by ensure-repo-issuer in THIS run is published by pki-web within one
           # timer period (5 min): retry up to ~6 min instead of failing the repo's first signing run
+          # CATBOY_CRL_RETRY_SLEEP is test-only: seconds between CRL-gate retries (default 30; tests/argv-secrets sets 1)
           tries=1; [ "${CATBOY_NEW_ISSUER:-}" = 1 ] && tries=13
           for t in $(seq 1 "$tries"); do
             crl_gate
