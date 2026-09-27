@@ -357,7 +357,10 @@ jobs:
           find_args() { local first=1; for p in $1; do [ $first = 1 ] || printf ' -o'; printf ' -name %q' "$p"; first=0; done; }
           has_glob "$PE_GLOB" && while IFS= read -r -d '' f; do
             if osslsigncode sign -certs "$RUNNER_TEMP/signchain.pem" -key "$RUNNER_TEMP/sign.key" -h sha256 -n "$GITHUB_REPOSITORY" "${TS[@]}" -in "$f" -out "$f.signed" >/dev/null 2>&1 && mv "$f.signed" "$f"; then
-              if osslsigncode verify -CAfile "$RUNNER_TEMP/root.crt" "${CRL[@]}" "${TSAV[@]}" -in "$f" >/dev/null 2>&1; then
+              # -ignore-cdp: verify against the CRLs the gate already fetched (-CRLfile, -TSA-CRLfile), with no second
+              # download. osslsigncode's own fetches send an empty User-Agent (flagged by CatWAF, 2026-09-27), and
+              # without CRL files it FAILS rather than skipping (measured), so this is not a revocation bypass.
+              if osslsigncode verify -ignore-cdp -CAfile "$RUNNER_TEMP/root.crt" "${CRL[@]}" "${TSAV[@]}" -in "$f" >/dev/null 2>&1; then
                 signed=$((signed+1)); echo "| \`${f#dist/}\` | $(sha256sum "$f" | cut -c1-64) | Authenticode |" >> dist/SIGNATURES.md
               else
                 osslsigncode remove-signature -in "$f" -out "$f.u" >/dev/null 2>&1 && mv "$f.u" "$f"; removed=$((removed+1)); echo "::warning::unverifiable signature removed: $f"
