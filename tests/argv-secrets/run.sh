@@ -5,7 +5,7 @@
 # and which secrets each endpoint received (proves delivery). Needs strace, openssl, jq, python3+yaml.
 set -u
 here=$(cd "$(dirname "$0")" && pwd); WF=$(realpath "${1:-$here/../../.github/workflows/catboy-sign.yml}")
-W=$(mktemp -d); trap 'rm -rf "$W"' EXIT; cp "$here/stub.py" "$W/"; cd "$W" || exit 1; mkdir -p rt ca; touch ca/index.txt
+W=$(mktemp -d); [ -n "${KEEP:-}" ] || trap 'rm -rf "$W"' EXIT; echo "workdir $W"; cp "$here/stub.py" "$W/"; cd "$W" || exit 1; mkdir -p rt ca; touch ca/index.txt
 python3 -c "
 import yaml,sys; w=yaml.safe_load(open(sys.argv[1]))
 for i in (2,3,5,8): open(f'step{i}.sh','w').write(w['jobs']['sign']['steps'][i]['run'])" "$WF"
@@ -17,6 +17,9 @@ k() { openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -keyout "$1
 k root; openssl x509 -req -in root.csr -key root.key -out root.pem -days 2 -extfile <(printf 'basicConstraints=critical,CA:TRUE\nkeyUsage=critical,keyCertSign,cRLSign\n') 2>/dev/null
 k int; openssl x509 -req -in int.csr -CA root.pem -CAkey root.key -CAcreateserial -out int.pem -days 1 -extfile int.ext 2>/dev/null
 k leaf; openssl x509 -req -in leaf.csr -CA int.pem -CAkey int.key -CAcreateserial -out leaf.pem -days 1 -extfile leaf.ext 2>/dev/null
+# TLS for the OpenBao stub: its own CA, server cert for IP 127.0.0.1 (the workflow pins it via CACERT_B64)
+k tlsca; openssl x509 -req -in tlsca.csr -key tlsca.key -out tlsca.pem -days 2 -extfile <(printf 'basicConstraints=critical,CA:TRUE\nkeyUsage=critical,keyCertSign\n') 2>/dev/null
+k tls; openssl x509 -req -in tls.csr -CA tlsca.pem -CAkey tlsca.key -CAcreateserial -out tls.pem -days 1 -extfile <(printf 'subjectAltName=IP:127.0.0.1\nextendedKeyUsage=serverAuth\n') 2>/dev/null
 openssl ca -config ca.cnf -gencrl -keyfile int.key -cert int.pem -out x.crl.pem 2>/dev/null; openssl crl -in x.crl.pem -outform DER -out x.crl
 python3 -c "
 import json, secrets
@@ -27,7 +30,7 @@ python3 stub.py & STUB=$!; sleep 0.7
 printf %s "$(S SECRET_ID)" > rt/secret_id; printf %s "$(S CATCMDB_TOKEN)" > rt/catcmdb_token; chmod 600 rt/*
 export RUNNER_TEMP=$PWD/rt GITHUB_OUTPUT=$PWD/rt/out GITHUB_ENV=$PWD/rt/env GITHUB_STEP_SUMMARY=$PWD/rt/sum
 ACTIONS_ID_TOKEN_REQUEST_TOKEN=$(S ID_REQ_TOKEN); export ACTIONS_ID_TOKEN_REQUEST_URL="http://127.0.0.1:18790/oidc?x=1" ACTIONS_ID_TOKEN_REQUEST_TOKEN
-export CATBOY_BAO_ADDR=http://127.0.0.1:18790 CATBOY_RUNNER_ISSUER=pve-r1 CATBOY_BAO_ROLE_ID=role-id-not-secret
+CATBOY_BAO_CACERT_B64=$(base64 -w0 < tlsca.pem); export CATBOY_BAO_CACERT_B64 CATBOY_BAO_ADDR=https://127.0.0.1:18791 CATBOY_RUNNER_ISSUER=pve-r1 CATBOY_BAO_ROLE_ID=role-id-not-secret
 export CATBOY_BAO_SECRET_ID_FILE=$PWD/rt/secret_id CATCMDB_URL=http://127.0.0.1:18790 CATCMDB_TOKEN_FILE=$PWD/rt/catcmdb_token
 export CATBOY_PKI_CODESIGN_MOUNT=pki-stg-codesign CATBOY_PKI_ROLE_PREFIX=sign-stg CATBOY_PKI_BASE=http://127.0.0.1:18790
 export GITHUB_REPOSITORY=smol-kitten/harness GITHUB_REPOSITORY_OWNER=smol-kitten GITHUB_REPOSITORY_ID=424242 GITHUB_RUN_ID=1 GITHUB_SHA=abc GITHUB_REF=refs/tags/v1 GITHUB_WORKFLOW_REF=x RUNNER_NAME=runner-pve-r1
@@ -49,4 +52,8 @@ echo "== processes exec'd:"; cat trace.* | grep -o 'execve("[^"]*' | sed 's/exec
 fail=$(for k in $(python3 -c "import json;print(' '.join(json.load(open('secrets.json'))))"); do cat trace.* | grep -c -F "$(S $k)"; done | awk "{s+=\$1} END{print s+0}")
 echo "== what the stub received (secret names per request):"; python3 -c "
 import json; [print('  ',r['path'][:60], r['got'], *(['repository_id=%r' % r['repository_id']] if 'repository_id' in r else [])) for r in json.load(open('seen.json'))]"
-echo "TOTAL secret occurrences on argv: $fail"; [ "$fail" = 0 ]
+echo "TOTAL secret occurrences on argv: $fail"
+# the always-run cleanup (step 5) must actually revoke the OIDC-login token (e2e 2026-09-27: it failed TLS)
+rv=$(python3 -c "import json; print(sum(1 for r in json.load(open('seen.json')) if r['path'].endswith('/auth/token/revoke-self') and 'BAO_TOKEN' in r['got']))")
+echo "revoke-self with the BAO token (cleanup): $rv (want 1)"
+[ "$fail" = 0 ] && [ "$rv" = 1 ]
