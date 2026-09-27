@@ -30,6 +30,7 @@ k int; openssl x509 -req -in int.csr -CA root.pem -CAkey root.key -CAcreateseria
 k leaf; openssl x509 -req -in leaf.csr -CA int.pem -CAkey int.key -CAcreateserial -out leaf.pem -days 1 -extfile leaf.ext 2>/dev/null
 k t0; openssl x509 -req -in t0.csr -CA root.pem -CAkey root.key -CAcreateserial -out t0.pem -days 1 -extfile <(printf "$ca_ext") 2>/dev/null
 k tsa; openssl x509 -req -in tsa.csr -CA t0.pem -CAkey t0.key -CAcreateserial -out tsa.pem -days 1 -extfile <(printf 'extendedKeyUsage=critical,timeStamping\nkeyUsage=critical,digitalSignature\n') 2>/dev/null
+openssl x509 -in t0.pem -outform DER -out t0.der   # pki-web serves DER
 openssl ca -config cat0.cnf -gencrl -keyfile t0.key -cert t0.pem -out t0.crl.pem 2>/dev/null; openssl crl -in t0.crl.pem -outform DER -out t0.crl
 printf '[tsa]\ndefault_tsa=t\n[t]\nserial=tsaserial\ncrypto_device=builtin\nsigner_digest=sha256\ndefault_policy=1.3.6.1.4.1.66963.1.1.99\ndigests=sha256\naccuracy=secs:1\nordering=no\ntsa_name=yes\ness_cert_id_chain=no\ness_cert_id_alg=sha256\n' > ts.cnf; echo 01 > tsaserial
 # TLS for the OpenBao stub: its own CA, server cert for IP 127.0.0.1 (the workflow pins it via CACERT_B64)
@@ -91,6 +92,11 @@ chk "sign step: signed=1 failed=0 removed=0" 'grep -q "signed=1 failed=0 removed
 chk "empty pe-glob skipped (no find error)" '! grep -q "empty parentheses" rt/log.4'
 chk "e2e.tar.gz.p7s.tsr verifies to the root" 'cat t0.pem int.pem > tsa-untr.pem; openssl ts -verify -data dist1/e2e.tar.gz.p7s -in dist1/e2e.tar.gz.p7s.tsr -CAfile root.pem -untrusted tsa-untr.pem >/dev/null 2>&1'
 chk "SIGNATURES.md names the .tsr" 'grep -q "e2e.tar.gz.p7s.tsr" dist1/SIGNATURES.md'
+# pki-web serves DER: bundles fed to `openssl ts -verify -untrusted` / -TSA-CAfile must be pure PEM with every
+# cert in them. OpenSSL 3.0 (the runners' Ubuntu Noble) cannot read a DER cert cat'ed into a PEM bundle; newer
+# OpenSSL tolerates it, so check the files, not just the verify (e2e v0.1.0: every .tsr failed on the runners)
+pem_ok() { [ -s "$1" ] && ! LC_ALL=C grep -q -P '[^\x09\x0a\x0d\x20-\x7e]' "$1" && [ "$(grep -c 'BEGIN CERTIFICATE' "$1")" -ge "$2" ]; }
+chk "TSA bundles are pure PEM with all certs (tsa-untrusted >= 2, tsa-anchors >= 2)" 'pem_ok rt/tsa-untrusted.pem 2 && pem_ok rt/tsa-anchors.pem 2'
 
 # ---- pass 2: a repo issuer created in THIS run (201) whose CRL is not published yet (2x 404: both
 # chain certs share the CDP, so try 1 sees them; the gate must wait and pass on try 2)
