@@ -100,6 +100,9 @@ permissions:
   id-token: write
   attestations: write
 
+env:
+  CATBOY_SIGN_VERSION: 2.1.4   # the User-Agent names it; bump with every release tag
+
 jobs:
   sign:
     name: catboy-sign
@@ -125,10 +128,14 @@ jobs:
         name: Gate 0 — is a CA configured on this runner?
         shell: bash
         env:   # expressions never go into shell source: every value arrives as an environment variable
+          CURL_HOME: ${{ runner.temp }}/catboy-curl
           FETCH_OUTCOME: ${{ steps.fetch.outcome }}
           ARTIFACT_NAME: ${{ inputs.artifact-name }}
         run: |
           set -uo pipefail
+          # every curl in this job identifies itself (CURL_HOME on each step points at this .curlrc):
+          # fleet WAFs flagged the bare curl/ UA as a bot and auto-banned n4's egress (2026-09-27)
+          mkdir -p "$RUNNER_TEMP/catboy-curl" && printf 'user-agent = "catboy-sign/%s (+https://pki.catboy.systems/cps)"\n' "$CATBOY_SIGN_VERSION" > "$RUNNER_TEMP/catboy-curl/.curlrc"
           if [ "$FETCH_OUTCOME" != 'success' ] || [ ! -d dist ]; then
             echo "gate=5" >> "$GITHUB_OUTPUT"; echo "reason=build artifact $ARTIFACT_NAME not available" >> "$GITHUB_OUTPUT"; exit 0
           fi
@@ -156,6 +163,8 @@ jobs:
         if: steps.gate0.outputs.gate == ''
         continue-on-error: true
         shell: bash
+        env:
+          CURL_HOME: ${{ runner.temp }}/catboy-curl
         run: |
           set -euo pipefail
           umask 077
@@ -188,8 +197,11 @@ jobs:
             CJWT=$(curl -sS -H @<(printf 'Authorization: bearer %s\n' "$ACTIONS_ID_TOKEN_REQUEST_TOKEN") "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=https://catcmdb.catboy.systems/pki" | jq -er .value) && echo "::add-mask::$CJWT"
             jq -n --arg issuer "rp-${CATBOY_RUNNER_ISSUER}-${OWNER}-${REPO}-${YEAR}" --arg runner "$CATBOY_RUNNER_ISSUER" --arg owner "$OWNER" --arg repo "$REPO" \
                   --argjson rid "$GITHUB_REPOSITORY_ID" --argjson year "$YEAR" '{issuer:$issuer, runner:$runner, owner:$owner, repo:$repo, repository_id:$rid, year:$year}' \
-              | curl -sS -m 30 -o /dev/null -w 'ensure-repo-issuer: %{http_code}\n' -X POST "$CATCMDB_URL/api/v1/pki/ensure-repo-issuer" \
-                  -H @<(printf 'Authorization: Bearer %s\nX-Bao-Token: %s\nX-GitHub-OIDC: %s\n' "$CT" "$RT" "${CJWT:-}") -H 'Content-Type: application/json' -d @- || true
+              | curl -sS -m 30 -o /dev/null -w '%{http_code}' -X POST "$CATCMDB_URL/api/v1/pki/ensure-repo-issuer" \
+                  -H @<(printf 'Authorization: Bearer %s\nX-Bao-Token: %s\nX-GitHub-OIDC: %s\n' "$CT" "$RT" "${CJWT:-}") -H 'Content-Type: application/json' -d @- > "$RUNNER_TEMP/eri.code" || true
+            eri=$(cat "$RUNNER_TEMP/eri.code" 2>/dev/null); echo "ensure-repo-issuer: ${eri:-000}"
+            # 201 = the repo issuer was created just now: its CRL is not public until the next pki-web publish
+            [ "$eri" = 201 ] && echo "CATBOY_NEW_ISSUER=1" >> "$GITHUB_ENV"
             unset CJWT
           fi
           unset CT
@@ -203,6 +215,7 @@ jobs:
         continue-on-error: true
         shell: bash
         env:
+          CURL_HOME: ${{ runner.temp }}/catboy-curl
           REQUIRE_PRODUCTION: ${{ inputs.require-production }}
           # PINNED TRUST ANCHORS, embedded: "<hierarchy> <base64 of the root certificate DER>" per line.
           # Each is trusted ALONE (one cert per CAfile, -no-CApath -no-CAstore), so no bundle, runner
@@ -260,29 +273,39 @@ jobs:
           # Fetch each chain cert's CDP plus the TSA chain (timestamp CA cert + CRL) and STOP with a named
           # reason if any is missing — osslsigncode hard-fails on an unreachable CDP, and a signed
           # artifact whose CRL is missing would fail verification everywhere.
-          : > "$RUNNER_TEMP/crls.pem"; missing=""
-          csplit -s -z -f "$RUNNER_TEMP/c-" "$RUNNER_TEMP/chain.pem" '/BEGIN CERTIFICATE/' '{*}' || true
-          for f in "$RUNNER_TEMP"/sign.crt "$RUNNER_TEMP"/c-*; do
-            subj=$(openssl x509 -in "$f" -noout -subject | sed 's/^subject=//')
-            urls=$(openssl x509 -in "$f" -noout -ext crlDistributionPoints 2>/dev/null | grep -o 'URI:[^ ,]*' | cut -c5-)
-            for url in $urls; do
-              if curl -sS -m 15 --fail "$url" -o "$RUNNER_TEMP/one.crl" 2>/dev/null \
-                 && { openssl crl -in "$RUNNER_TEMP/one.crl" -inform DER -outform PEM 2>/dev/null || openssl crl -in "$RUNNER_TEMP/one.crl" -outform PEM 2>/dev/null; } >> "$RUNNER_TEMP/crls.pem"; then :
-              else missing="$missing [$subj] $url"; fi
+          crl_gate() {
+            : > "$RUNNER_TEMP/crls.pem"; missing=""
+            csplit -s -z -f "$RUNNER_TEMP/c-" "$RUNNER_TEMP/chain.pem" '/BEGIN CERTIFICATE/' '{*}' || true
+            for f in "$RUNNER_TEMP"/sign.crt "$RUNNER_TEMP"/c-*; do
+              subj=$(openssl x509 -in "$f" -noout -subject | sed 's/^subject=//')
+              urls=$(openssl x509 -in "$f" -noout -ext crlDistributionPoints 2>/dev/null | grep -o 'URI:[^ ,]*' | cut -c5-)
+              for url in $urls; do
+                if curl -sS -m 15 --fail "$url" -o "$RUNNER_TEMP/one.crl" 2>/dev/null \
+                   && { openssl crl -in "$RUNNER_TEMP/one.crl" -inform DER -outform PEM 2>/dev/null || openssl crl -in "$RUNNER_TEMP/one.crl" -outform PEM 2>/dev/null; } >> "$RUNNER_TEMP/crls.pem"; then :
+                else missing="$missing [$subj] $url"; fi
+              done
             done
-          done
-          PKI=${CATBOY_PKI_BASE:-http://pki.catboy.systems}
-          if [ -n "${CATBOY_TSA_URL:-}" ]; then
-            TSCA=${CATBOY_TIMESTAMP_CA_NAME:-t1}
-            curl -sS -m 15 --fail "$PKI/certs/$TSCA.crt" -o "$RUNNER_TEMP/tsca.crt" 2>/dev/null || missing="$missing [timestamp CA cert] $PKI/certs/$TSCA.crt"
-            curl -sS -m 15 --fail "$PKI/crl/$TSCA.crl"  -o "$RUNNER_TEMP/tsca.crl" 2>/dev/null || missing="$missing [timestamp CA CRL] $PKI/crl/$TSCA.crl"
-            # fetched over http: it becomes a TSA anchor only if it chains to the pinned root
-            if [ -s "$RUNNER_TEMP/tsca.crt" ]; then
-              if openssl verify -no-CApath -no-CAstore -CAfile "$RUNNER_TEMP/root.crt" -untrusted "$RUNNER_TEMP/chain.pem" "$RUNNER_TEMP/tsca.crt" >/dev/null 2>&1; then
-                cat "$RUNNER_TEMP/root.crt" "$RUNNER_TEMP/tsca.crt" > "$RUNNER_TEMP/tsa-anchors.pem"
-              else missing="$missing [timestamp CA does not chain to the pinned root] $PKI/certs/$TSCA.crt"; fi
+            PKI=${CATBOY_PKI_BASE:-http://pki.catboy.systems}
+            if [ -n "${CATBOY_TSA_URL:-}" ]; then
+              TSCA=${CATBOY_TIMESTAMP_CA_NAME:-t1}
+              curl -sS -m 15 --fail "$PKI/certs/$TSCA.crt" -o "$RUNNER_TEMP/tsca.crt" 2>/dev/null || missing="$missing [timestamp CA cert] $PKI/certs/$TSCA.crt"
+              curl -sS -m 15 --fail "$PKI/crl/$TSCA.crl"  -o "$RUNNER_TEMP/tsca.crl" 2>/dev/null || missing="$missing [timestamp CA CRL] $PKI/crl/$TSCA.crl"
+              # fetched over http: it becomes a TSA anchor only if it chains to the pinned root
+              if [ -s "$RUNNER_TEMP/tsca.crt" ]; then
+                if openssl verify -no-CApath -no-CAstore -CAfile "$RUNNER_TEMP/root.crt" -untrusted "$RUNNER_TEMP/chain.pem" "$RUNNER_TEMP/tsca.crt" >/dev/null 2>&1; then
+                  cat "$RUNNER_TEMP/root.crt" "$RUNNER_TEMP/tsca.crt" > "$RUNNER_TEMP/tsa-anchors.pem"
+                else missing="$missing [timestamp CA does not chain to the pinned root] $PKI/certs/$TSCA.crt"; fi
+              fi
             fi
-          fi
+          }
+          # a repo issuer created by ensure-repo-issuer in THIS run is published by pki-web within one
+          # timer period (5 min): retry up to ~6 min instead of failing the repo's first signing run
+          tries=1; [ "${CATBOY_NEW_ISSUER:-}" = 1 ] && tries=13
+          for t in $(seq 1 "$tries"); do
+            crl_gate
+            [ -z "$missing" ] && break
+            [ "$t" -lt "$tries" ] && { echo "CRL not yet published (try $t/$tries): waiting for the pki-web publish"; sleep "${CATBOY_CRL_RETRY_SLEEP:-30}"; }
+          done
           if [ -n "$missing" ]; then echo "reason=CRL not published for:$missing" >> "$GITHUB_OUTPUT"; echo "::error::CRL not published for:$missing"; exit 1; fi
           # mirror the leaf into CatCMDB so revocation-by-run is a lookup, not an enumeration
           CT=${CATCMDB_TOKEN:-}; if [ -n "${CATCMDB_TOKEN_FILE:-}" ] && [ -r "$CATCMDB_TOKEN_FILE" ]; then CT=$(<"$CATCMDB_TOKEN_FILE"); fi; [ -z "$CT" ] || echo "::add-mask::$CT"   # file wins, like the secret_id
@@ -303,6 +326,7 @@ jobs:
         continue-on-error: true
         shell: bash
         env:
+          CURL_HOME: ${{ runner.temp }}/catboy-curl
           LEAF_SERIAL: ${{ steps.cert.outputs.serial }}
           HIERARCHY: ${{ steps.cert.outputs.hierarchy }}
           ROOT_FP: ${{ steps.cert.outputs.root-fingerprint }}
@@ -316,10 +340,13 @@ jobs:
           TSAV=(); [ -s "$RUNNER_TEMP/tsa-anchors.pem" ] && TSAV=(-TSA-CAfile "$RUNNER_TEMP/tsa-anchors.pem" -TSA-CRLfile "$RUNNER_TEMP/tsca.crl")
           v=$(osslsigncode --version 2>&1 | grep -oE '[0-9]+\.[0-9]+' | head -1); [ "$(printf '%s\n2.13\n' "$v" | sort -V | head -1)" = "2.13" ] || echo "::warning::osslsigncode $v < 2.13 on this runner (memory-safety fixes); the runner image should carry >= 2.13"
           cat "$RUNNER_TEMP/sign.crt" "$RUNNER_TEMP/chain.pem" > "$RUNNER_TEMP/signchain.pem"
+          # the TSA chain for verifying CMS timestamp tokens: timestamp CA + the branch chain (anchor: the pinned root)
+          [ -s "$RUNNER_TEMP/tsca.crt" ] && cat "$RUNNER_TEMP/tsca.crt" "$RUNNER_TEMP/chain.pem" > "$RUNNER_TEMP/tsa-untrusted.pem"
+          has_glob() { [ -n "${1//[[:space:]]/}" ]; }   # an empty glob list means "none", not find()
           { echo "# Signatures"; echo; echo "Signed by catboy.systems PKI (**$HIERARCHY** hierarchy, root SHA-256 \`$ROOT_FP\`) for \`$GITHUB_REPOSITORY\` run $GITHUB_RUN_ID (leaf serial $LEAF_SERIAL)."; echo; echo '| file | sha256 | signature |'; echo '|---|---|---|'; } > dist/SIGNATURES.md
           # shellcheck disable=SC2086
           find_args() { local first=1; for p in $1; do [ $first = 1 ] || printf ' -o'; printf ' -name %q' "$p"; first=0; done; }
-          while IFS= read -r -d '' f; do
+          has_glob "$PE_GLOB" && while IFS= read -r -d '' f; do
             if osslsigncode sign -certs "$RUNNER_TEMP/signchain.pem" -key "$RUNNER_TEMP/sign.key" -h sha256 -n "$GITHUB_REPOSITORY" "${TS[@]}" -in "$f" -out "$f.signed" >/dev/null 2>&1 && mv "$f.signed" "$f"; then
               if osslsigncode verify -CAfile "$RUNNER_TEMP/root.crt" "${CRL[@]}" "${TSAV[@]}" -in "$f" >/dev/null 2>&1; then
                 signed=$((signed+1)); echo "| \`${f#dist/}\` | $(sha256sum "$f" | cut -c1-64) | Authenticode |" >> dist/SIGNATURES.md
@@ -328,10 +355,21 @@ jobs:
               fi
             else rm -f "$f.signed"; fail=$((fail+1)); echo "::warning::sign failed: $f"; fi
           done < <(eval find dist -type f \\\( "$(find_args "$PE_GLOB")" \\\) -print0)
-          while IFS= read -r -d '' f; do
+          has_glob "$ARCHIVE_GLOB" && while IFS= read -r -d '' f; do
             if openssl cms -sign -binary -in "$f" -signer "$RUNNER_TEMP/sign.crt" -inkey "$RUNNER_TEMP/sign.key" -certfile "$RUNNER_TEMP/chain.pem" -outform DER -out "$f.p7s" 2>/dev/null \
                && openssl cms -verify -binary -content "$f" -in "$f.p7s" -inform DER -no-CApath -no-CAstore -CAfile "$RUNNER_TEMP/root.crt" -purpose any -out /dev/null 2>/dev/null; then
-              signed=$((signed+1)); echo "| \`${f#dist/}\` | $(sha256sum "$f" | cut -c1-64) | CMS detached \`${f##*/}.p7s\` |" >> dist/SIGNATURES.md
+              tsnote=""
+              if [ -n "${CATBOY_TSA_URL:-}" ]; then
+                # RFC 3161 token over the signature bytes: the .p7s stays verifiable after the 1-hour leaf,
+                # at the token's genTime. Required whenever a TSA is configured, like Authenticode's -ts.
+                if openssl ts -query -data "$f.p7s" -sha256 -cert -out "$RUNNER_TEMP/q.tsq" 2>/dev/null \
+                   && curl -sS -m 30 --fail -H 'Content-Type: application/timestamp-query' --data-binary @"$RUNNER_TEMP/q.tsq" -o "$f.p7s.tsr" "$CATBOY_TSA_URL" \
+                   && [ -s "$RUNNER_TEMP/tsa-untrusted.pem" ] \
+                   && openssl ts -verify -data "$f.p7s" -in "$f.p7s.tsr" -CAfile "$RUNNER_TEMP/root.crt" -untrusted "$RUNNER_TEMP/tsa-untrusted.pem" >/dev/null 2>&1; then
+                  tsnote=" + RFC 3161 \`${f##*/}.p7s.tsr\`"
+                else rm -f "$f.p7s" "$f.p7s.tsr"; fail=$((fail+1)); echo "::warning::CMS timestamp failed or did not verify: $f"; continue; fi
+              fi
+              signed=$((signed+1)); echo "| \`${f#dist/}\` | $(sha256sum "$f" | cut -c1-64) | CMS detached \`${f##*/}.p7s\`$tsnote |" >> dist/SIGNATURES.md
             else rm -f "$f.p7s"; fail=$((fail+1)); echo "::warning::CMS sign/verify failed: $f"; fi
           done < <(eval find dist -type f \\\( "$(find_args "$ARCHIVE_GLOB")" \\\) -print0)
           echo "signed=$signed failed=$fail removed=$removed"
@@ -342,6 +380,8 @@ jobs:
       - name: Shred the run key
         if: always()
         shell: bash
+        env:
+          CURL_HOME: ${{ runner.temp }}/catboy-curl
         run: |
           [ -f "$RUNNER_TEMP/sign.key" ] && (shred -u "$RUNNER_TEMP/sign.key" 2>/dev/null || rm -f "$RUNNER_TEMP/sign.key"); rm -f "$RUNNER_TEMP/cert.json"
           if [ -n "${BAO_TOKEN:-}" ] && [ -n "${CATBOY_BAO_ADDR:-}" ]; then
@@ -375,6 +415,7 @@ jobs:
         if: always()
         shell: bash
         env:
+          CURL_HOME: ${{ runner.temp }}/catboy-curl
           G0_GATE: ${{ steps.gate0.outputs.gate }}
           G0_REASON: ${{ steps.gate0.outputs.reason }}
           LOGIN_OUTCOME: ${{ steps.login.outcome }}
