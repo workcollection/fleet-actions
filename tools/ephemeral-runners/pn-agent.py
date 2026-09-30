@@ -80,9 +80,15 @@ def docker(*args, check=True, capture=True):
 
 
 def managed():
-    """Return the managed containers, running or not."""
-    out = docker("ps", "-a", "--size", "--filter", f"label={LABEL}=1",
-                 "--format", "{{json .}}").stdout
+    """Return the managed containers, running or not.
+
+    `docker ps --size` fails when a container's files change while docker
+    measures them (seen: apt replacing a file mid-job). Sizes are then left
+    at 0 for this pass instead of failing the whole listing.
+    """
+    args = ["ps", "-a", "--filter", f"label={LABEL}=1", "--format", "{{json .}}"]
+    r = docker(*args[:2], "--size", *args[2:], check=False)
+    out = r.stdout if r.returncode == 0 else docker(*args).stdout
     rows = []
     for line in out.splitlines():
         d = json.loads(line)
