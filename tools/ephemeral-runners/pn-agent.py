@@ -85,10 +85,19 @@ def managed():
     `docker ps --size` fails when a container's files change while docker
     measures them (seen: apt replacing a file mid-job). Sizes are then left
     at 0 for this pass instead of failing the whole listing.
+    Even the plain listing can fail for a moment while a --rm container is
+    being removed ("rw layer snapshot not found"), so retry it.
     """
     args = ["ps", "-a", "--filter", f"label={LABEL}=1", "--format", "{{json .}}"]
     r = docker(*args[:2], "--size", *args[2:], check=False)
-    out = r.stdout if r.returncode == 0 else docker(*args).stdout
+    for attempt in range(3):
+        if r.returncode == 0:
+            break
+        time.sleep(1)
+        r = docker(*args, check=False)
+    if r.returncode != 0:
+        raise RuntimeError(f"docker ps failed 3 times: {r.stderr.strip()[:300]}")
+    out = r.stdout
     rows = []
     for line in out.splitlines():
         d = json.loads(line)
