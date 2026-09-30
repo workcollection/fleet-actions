@@ -11,6 +11,7 @@ repo, squash-merge, never `--admin`.
 | `rollout-checks.py` | Add `fleet-check.yml` (and, for public repos, `pvr-check.yml` + `SECURITY.md` for user-account owners) — new files only. `--only fleet-check|pvr-check`. Needs an inventory TSV (`FLEET_INVENTORY`, columns: repo, visibility, …) and `USER_ACCOUNT_OWNERS`. |
 | `gate-merge.py` | Poll `gh pr checks` and merge each PR only when its check family (`GATE_PREFIX`, e.g. `security /`, `hygiene /`, `pvr /`) is green; report holds and unrelated reds by cause. |
 | `pool-drain.sh` | Wait until no run is queued/in progress across a list of repos; prints minutes — the post-merge pool-occupancy figure used for runner sizing. |
+| `ephemeral-runners/` | One single-use `--ephemeral` runner container per queued job for user-account repos (no org runner groups): `pn-minter.py` holds the token and mints registration tokens, `pn-agent.py` runs the containers under caps. See its README. |
 
 Rules learned the hard way (all in the wiki): merge only on a REAL green run of the check
 under test; a workflow file not yet on the default branch cannot be dispatched, so new
