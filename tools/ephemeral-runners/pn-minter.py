@@ -35,6 +35,9 @@ DEFAULTS = {
     "OWNER": "polo-nyan",
     "AGENT_CMD": "pn-agent",
     "ALLOW_PUBLIC": "",
+    # For allowlisted PUBLIC repos, serve only these events, triggered by OWNER
+    # from the repo itself: never pull_request / pull_request_target.
+    "PUBLIC_EVENTS": "push,workflow_dispatch",
     "EXCLUDE_WORKFLOWS": "",  # comma list of owner/repo:path or owner/repo:path#job name
     "JOB_LABELS_OK": "self-hosted,linux,x64,polo-nyan",
     "ALERT_MIN": "30",
@@ -132,9 +135,10 @@ def repos(c, gh, state):
     return ok, public
 
 
-def queued_jobs(c, gh, repo):
+def queued_jobs(c, gh, repo, public=False):
     """Queued jobs of the repo, each with an 'eligible' verdict and reason."""
     labels_ok = {x.strip().lower() for x in c["JOB_LABELS_OK"].split(",")}
+    public_events = {x.strip() for x in c["PUBLIC_EVENTS"].split(",") if x.strip()}
     excluded = {x.strip() for x in c["EXCLUDE_WORKFLOWS"].split(",") if x.strip()}
     out = []
     for status in ("queued", "in_progress"):
@@ -156,6 +160,10 @@ def queued_jobs(c, gh, repo):
                 elif run["event"] == "pull_request" and \
                         (run.get("head_repository") or {}).get("full_name") != repo:
                     reason = "pull_request from a fork"
+                elif public and (run["event"] not in public_events
+                                 or (run.get("actor") or {}).get("login") != c["OWNER"]
+                                 or (run.get("head_repository") or {}).get("full_name") != repo):
+                    reason = f"public repo: only {','.join(sorted(public_events))} by {c['OWNER']}"
                 out.append({"repo": repo, "run": run["id"], "job": j["id"], "name": j["name"],
                             "workflow": run["path"], "created": j["created_at"],
                             "eligible": reason is None, "reason": reason})
@@ -216,9 +224,10 @@ def main():
             idle[x["repo"]] = idle.get(x["repo"], 0) + 1
 
     ok, public = repos(c, gh, state)
+    allow = {x.strip() for x in c["ALLOW_PUBLIC"].split(",") if x.strip()}
     jobs = []
     for repo in ok:
-        jobs += queued_jobs(c, gh, repo)
+        jobs += queued_jobs(c, gh, repo, public=repo in allow)
 
     if mode == "--check":
         print(f"host load1={status['load1']} disk_free={status['disk_free_gb']} GB "
