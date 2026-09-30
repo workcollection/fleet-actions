@@ -1,0 +1,13 @@
+# pn-agent config. Copy to /etc/pn-runner/agent.conf.
+# Pin IMAGE by digest.
+OWNER=your-user
+LABELS=self-hosted,linux,polo-nyan
+MAX_JOBS=3
+CPUS=2
+MEMORY=3g
+PIDS=2048
+DISK_MAX_GB=12
+DISK_FREE_MIN_GB=30
+JOB_TIMEOUT_MIN=60
+IDLE_MAX_MIN=15
+LOAD_MAX=8

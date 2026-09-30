@@ -1,0 +1,16 @@
+[Unit]
+Description=pn-minter: mint repo registration tokens for ephemeral runners
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Environment=HOME=/root
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/bin:/bin
+# Inject GH_TOKEN from your secret store, for example a 0600 EnvironmentFile.
+EnvironmentFile=/etc/pn-runner/minter.env
+ExecStart=/usr/local/sbin/pn-minter
+TimeoutStartSec=240
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=pn-minter
