@@ -1,0 +1,10 @@
+[Unit]
+Description=pn-agent reap: job timeout, disk budget and idle limit for polo-nyan ephemeral runners
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/pn-agent reap
+TimeoutStartSec=120
+SyslogIdentifier=pn-agent

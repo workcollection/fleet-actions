@@ -1,0 +1,14 @@
+# pn-minter config. Copy to /etc/pn-runner/minter.conf.
+OWNER=your-user
+# How to reach pn-agent. The minter appends the subcommand and writes the token on stdin.
+AGENT_CMD=ssh -o BatchMode=yes -o ConnectTimeout=15 root@docker-host /usr/local/sbin/pn-agent
+JOB_LABELS_OK=self-hosted,linux,x64,polo-nyan
+# Public repos are served only when listed here, after their pull_request triggers are reviewed.
+ALLOW_PUBLIC=
+# Jobs that need a docker daemon: owner/repo:path or owner/repo:path#job name, comma-separated.
+EXCLUDE_WORKFLOWS=your-user/app:.github/workflows/ci.yml#Build Docker Images
+ALERT_MIN=30
+ALERT_REPEAT_MIN=60
+# Called with the alert text as its last argument. Empty = log only.
+NOTIFY_CMD=
+STATE=/var/lib/pn-minter/state.json
