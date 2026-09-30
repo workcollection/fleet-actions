@@ -23,6 +23,7 @@ The account token never reaches the docker host. The docker host only sees regis
 | Skip starts while host 1-minute load is above | agent `LOAD_MAX` | 8 |
 | No `docker.sock`, no account token in job containers | agent | always |
 | Public repositories are not served unless listed | minter `ALLOW_PUBLIC` | empty |
+| Listed public repositories: only these events, run by the owner from the repo itself | minter `PUBLIC_EVENTS` | push,workflow_dispatch |
 | `pull_request` runs from forks are not served | minter | always |
 | Jobs that need a docker daemon are skipped | minter `EXCLUDE_WORKFLOWS` | per site |
 
