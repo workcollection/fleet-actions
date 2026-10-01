@@ -153,6 +153,7 @@ jobs:
   build:   # … uploads dist/ as artifact "binaries"
   sign:
     needs: build
+    permissions: { contents: read, id-token: write, attestations: write }
     uses: workcollection/fleet-actions/.github/workflows/catboy-sign.yml@v2.1.6
     with: { artifact-name: binaries, runs-on: self-hosted }
   release:
@@ -161,6 +162,10 @@ jobs:
       - uses: actions/download-artifact@…
         with: { name: ${{ needs.sign.outputs.artifact }}, path: out }
 ```
+
+The `sign` job must grant all three permissions, **even with `attest: false`**: the workflow
+requests them at the top level, and GitHub refuses to start a run whose caller grants less
+(`startup_failure`, no job queued, nothing in the logs).
 
 The repo identity is this run's GitHub OIDC token, which the CA binds to
 **this file at a `v2.*` tag** (`job_workflow_ref`), never to a branch — which is why the
