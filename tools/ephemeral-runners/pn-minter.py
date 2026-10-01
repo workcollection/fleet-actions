@@ -41,6 +41,11 @@ DEFAULTS = {
     "EXCLUDE_WORKFLOWS": "",  # comma list of owner/repo:path or owner/repo:path#job name
     "JOB_LABELS_OK": "self-hosted,linux,x64,polo-nyan",
     "ALERT_MIN": "30",
+    # Page only on a true stall: over ALERT_MIN, the gate was open (free slot AND host
+    # load1 < LOAD_MAX) for at least STALL_SHARE of the ticks. A queue that only waits on
+    # the load gate or the cap is logged, not paged.
+    "LOAD_MAX": "8",
+    "STALL_SHARE": "0.5",
     "ALERT_REPEAT_MIN": "60",
     "REPO_CACHE_S": "3600",
     "SWEEP_S": "300",
@@ -256,13 +261,24 @@ def main():
         if age_min(j["created"]) > int(c["ALERT_MIN"]):
             n, oldest = stale.get(j["repo"], (0, 0))
             stale[j["repo"]] = (n + 1, max(oldest, age_min(j["created"])))
+    # Gate-open history over the alert window: (time, slot free and load below LOAD_MAX).
+    now = time.time()
+    gate_open = len(live) < status["max_jobs"] and status["load1"] < float(c["LOAD_MAX"])
+    hist = [h for h in state.get("gate_hist", []) if now - h[0] <= int(c["ALERT_MIN"]) * 60]
+    hist.append([now, gate_open])
+    state["gate_hist"] = hist
+    open_share = sum(1 for _, o in hist if o) / len(hist)
     if stale:
         worst = sorted(stale.items(), key=lambda kv: -kv[1][1])
-        notify(c, state, "queue",
-               f"pn-minter: {sum(n for n, _ in stale.values())} polo-nyan job(s) queued over "
-               f"{c['ALERT_MIN']} min in {len(stale)} repo(s); oldest "
-               + ", ".join(f"{r.split('/', 1)[1]} {o:.0f} min" for r, (n, o) in worst[:5])
-               + f". Runners {len(live)}/{status['max_jobs']}, load {status['load1']}.")
+        text = (f"pn-minter: {sum(n for n, _ in stale.values())} polo-nyan job(s) queued over "
+                f"{c['ALERT_MIN']} min in {len(stale)} repo(s); oldest "
+                + ", ".join(f"{r.split('/', 1)[1]} {o:.0f} min" for r, (n, o) in worst[:5])
+                + f". Runners {len(live)}/{status['max_jobs']}, load {status['load1']}, "
+                f"gate open {open_share:.0%} of the last {c['ALERT_MIN']} min.")
+        if gate_open and open_share >= float(c["STALL_SHARE"]):
+            notify(c, state, "queue", text + " STALL: runners idle with the gate open.")
+        else:
+            log("queue waits on the load gate or the cap (not paged): " + text)
 
     slots = status["max_jobs"] - len(live)
     started = 0

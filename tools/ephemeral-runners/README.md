@@ -26,6 +26,7 @@ The account token never reaches the docker host. The docker host only sees regis
 | Listed public repositories: only these events, run by the owner from the repo itself | minter `PUBLIC_EVENTS` | push,workflow_dispatch |
 | `pull_request` runs from forks are not served | minter | always |
 | Jobs that need a docker daemon are skipped | minter `EXCLUDE_WORKFLOWS` | per site |
+| Page only on a true stall: jobs over `ALERT_MIN` while the gate (free slot and load below `LOAD_MAX`) was open for `STALL_SHARE` of that time | minter | 30 min, 8, 0.5 |
 
 ## How the registration token travels
 

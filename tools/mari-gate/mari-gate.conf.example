@@ -1,0 +1,8 @@
+# /etc/mari-gate.conf (sourced by mari-gate)
+RUNNER_PREFIX=runner-          # containers are <prefix>1 .. <prefix><POOL_SIZE>
+POOL_SIZE=10
+CAP=6                          # at most this many runner containers online
+LOAD_MAX=8                     # park idle runners while the host 1-minute load is at or above this
+HOLD_S=120                     # wait this long after the last park before unparking
+LAUNCH_CMD=/usr/local/sbin/run-runners.sh   # called as: LAUNCH_CMD <index>
+MODE=observe                   # observe first; switch to enforce when the log looks right
