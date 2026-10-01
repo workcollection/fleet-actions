@@ -2,8 +2,9 @@
 # no docker.sock in any container, nothing else of value on it).
 IMAGE=pn-sign-runner:1
 OWNER=your-user
-LABELS=self-hosted,catboy-sign,your-user-signing
-NO_DEFAULT_LABELS=1          # no Linux/X64 defaults: a [self-hosted, linux] job cannot land here
+# Exactly ONE unique label, no self-hosted: only a job with runs-on: your-user-signing can land here.
+LABELS=your-user-signing
+NO_DEFAULT_LABELS=1          # no self-hosted/Linux/X64 defaults
 MAX_JOBS=1
 CPUS=2
 MEMORY=3g

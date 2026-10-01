@@ -20,7 +20,12 @@ def run(conf, labels):
     return [(j["eligible"], j["reason"]) for j in m.queued_jobs(c, FakeGH(labels), "polo-nyan/pawkit")]
 
 SIGN = {"JOB_LABELS_OK": "self-hosted,catboy-sign,polo-nyan-signing", "REQUIRE_LABELS": "catboy-sign"}
+ONE = {"JOB_LABELS_OK": "polo-nyan-signing", "REQUIRE_LABELS": "polo-nyan-signing"}
 cases = [
+  ("one-label signing: [polo-nyan-signing] eligible",            ONE, [["polo-nyan-signing"]], [(True, None)]),
+  ("one-label signing: [self-hosted] is not this pool's",        ONE, [["self-hosted"]], []),
+  ("one-label signing: [self-hosted, linux] is not this pool's", ONE, [["self-hosted", "linux"]], []),
+  ("one-label signing: [polo-nyan-signing, gpu] not eligible",   ONE, [["polo-nyan-signing", "gpu"]], [(False, "labels")]),
   ("signing: [self-hosted, linux] is not this pool's", SIGN, [["self-hosted", "linux"]], []),
   ("signing: bare [self-hosted] is UNSAFE",            SIGN, [["self-hosted"]], [(False, "UNSAFE")]),
   ("signing: [self-hosted, catboy-sign] eligible",     SIGN, [["self-hosted", "catboy-sign"]], [(True, None)]),

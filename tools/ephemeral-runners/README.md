@@ -100,13 +100,11 @@ The same two scripts run a second, single-slot pool that takes **only** signing 
 
 ### Which jobs can reach the signing runner
 
-A user account has no runner groups. GitHub gives a queued job to any runner of that repository whose labels cover the job's `runs-on`. So:
+A user account has no runner groups. GitHub gives a queued job to any runner of that repository whose labels cover the job's `runs-on`. So the signing runner carries **exactly one unique label**, for example `your-user-signing`:
 
 1. **Repository allowlist:** `ONLY_REPOS`. Signing runners register only to those repositories.
-2. **No default labels:** `NO_DEFAULT_LABELS=1`. The runner registers with exactly `LABELS`, without `Linux` or `X64`, so `[self-hosted, linux]` jobs can never land on it.
-3. **Required label:** `REQUIRE_LABELS=catboy-sign`. The minter starts a signing runner only for jobs that ask for `catboy-sign`.
-4. **Unsafe-job guard:** if an allowlisted repository has ANY queued job whose labels fit the signing runner's labels without carrying `catboy-sign` (for example a bare `runs-on: self-hosted`), the minter does not start a runner for that repository and pages. Fix the workflow, for example by adding `linux`, before signing resumes there.
-
-Rule for allowlisted repositories: **no job may use a bare `runs-on: self-hosted`.**
+2. **One label, no defaults:** `LABELS=your-user-signing` with `NO_DEFAULT_LABELS=1`. The runner has no `self-hosted`, `Linux` or `X64` label. Only a job whose `runs-on` is exactly that label can land on it. A bare `runs-on: self-hosted` or `[self-hosted, linux]` job cannot.
+3. **Callers:** use `runs-on: your-user-signing` verbatim. `catboy-sign.yml` passes `runs-on` through as a string, and a list does not work there.
+4. **Required label + guard (belt and braces):** `REQUIRE_LABELS=your-user-signing`. The minter starts a signing runner only for those jobs. If an allowlisted repository has a queued job that fits the runner's labels without carrying the required one, no runner is started there and the minter pages.
 
 `test_minter_labels.py` covers the label routing for both pools.
