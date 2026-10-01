@@ -27,7 +27,9 @@ MODE=enforce
 CONF=${MARI_GATE_CONF:-/etc/mari-gate.conf}
 [ -f "$CONF" ] && . "$CONF"
 mkdir -p "$STATE/parked"
-log(){ logger -t mari-gate "$*"; echo "mari-gate: $*"; }
+# One journal line per decision: under systemd (INVOCATION_ID set) stdout already goes to the
+# journal, so only print when run by hand.
+log(){ logger -t mari-gate "$*"; [ -n "${INVOCATION_ID:-}" ] || echo "mari-gate: $*"; }
 name(){ echo "${RUNNER_PREFIX}$1"; }
 # Capture first, then match: with pipefail, `docker ... | grep -q` fails when grep exits
 # early and docker gets SIGPIPE, which would report a busy runner as idle and park it mid-job.
