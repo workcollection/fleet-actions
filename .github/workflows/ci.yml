@@ -59,6 +59,8 @@ jobs:
         run: python3 tools/ephemeral-runners/test_minter_labels.py
       - name: mari-gate scenarios (stub docker)
         run: bash tools/mari-gate/test.sh
+      - name: catboy-sign step scripts (version gate, output-set assert, report)
+        run: python3 tools/catboy-sign-tests/run_steps.py
 
   smoke:
     name: Smoke - every composite actually runs

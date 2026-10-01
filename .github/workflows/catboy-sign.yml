@@ -136,10 +136,12 @@ jobs:
         if: steps.fetch.outcome == 'success'
         shell: bash
         run: |
-          # The file list of THIS run's artifact. The assert step before attest/upload
-          # checks that the output is exactly this set plus the signatures we add.
-          [ -d dist ] && find dist -type f -printf '%P\n' | LC_ALL=C sort > "$RUNNER_TEMP/catboy-input.files"
-          echo "input files: $(wc -l < "$RUNNER_TEMP/catboy-input.files" 2>/dev/null || echo 0)"
+          # The entry list of THIS run's artifact (files and symlinks, NUL-separated so any
+          # name is safe). The assert step before attest/upload checks that the output is
+          # exactly this set plus the signatures we add.
+          : > "$RUNNER_TEMP/catboy-input.z"
+          if [ -d dist ]; then find dist \( -type f -o -type l \) -printf '%P\0' | LC_ALL=C sort -z > "$RUNNER_TEMP/catboy-input.z"; fi
+          echo "input entries: $(tr -cd '\0' < "$RUNNER_TEMP/catboy-input.z" | wc -c)"
 
       - id: gate0
         name: Gate 0 — is a CA configured on this runner?
@@ -172,7 +174,7 @@ jobs:
           # No apt fallback: distro packages lag (noble ships 2.8). The runner image must carry it.
           command -v osslsigncode >/dev/null || { echo "gate=3" >> "$GITHUB_OUTPUT"; echo "reason=osslsigncode not installed on runner ${RUNNER_NAME:-?} (the runner image must carry >= 2.13)" >> "$GITHUB_OUTPUT"; exit 0; }
           # Floor 2.13 (memory-safety fixes). A gate, not a warning: no signing below it.
-          v=$(osslsigncode --version 2>&1 | grep -oE '[0-9]+\.[0-9]+' | head -1)
+          v=$(osslsigncode --version 2>&1 | grep -oE '[0-9]+\.[0-9]+' | head -1 || true)   # no match must gate, not kill the step (bash -e)
           [ "$(printf '%s\n2.13\n' "${v:-0}" | sort -V | head -1)" = "2.13" ] || { echo "gate=3" >> "$GITHUB_OUTPUT"; echo "reason=osslsigncode ${v:-?} on runner ${RUNNER_NAME:-?} is below the 2.13 floor; use a runner image that carries >= 2.13" >> "$GITHUB_OUTPUT"; exit 0; }
           echo "gate=" >> "$GITHUB_OUTPUT"; echo "reason=" >> "$GITHUB_OUTPUT"
 
@@ -380,7 +382,7 @@ jobs:
               if osslsigncode verify -ignore-cdp -CAfile "$RUNNER_TEMP/root.crt" "${CRL[@]}" "${TSAV[@]}" -in "$f" >/dev/null 2>&1; then
                 signed=$((signed+1)); echo "| \`${f#dist/}\` | $(sha256sum "$f" | cut -c1-64) | Authenticode |" >> dist/SIGNATURES.md
               else
-                osslsigncode remove-signature -in "$f" -out "$f.u" >/dev/null 2>&1 && mv "$f.u" "$f"; removed=$((removed+1)); echo "::warning::unverifiable signature removed: $f"
+                { osslsigncode remove-signature -in "$f" -out "$f.u" >/dev/null 2>&1 && mv "$f.u" "$f"; } || rm -f "$f.u"; removed=$((removed+1)); echo "::warning::unverifiable signature removed: $f"
               fi
             else rm -f "$f.signed"; fail=$((fail+1)); echo "::warning::sign failed: $f"; fi
           done < <(eval find dist -type f \\\( "$(find_args "$PE_GLOB")" \\\) -print0)
@@ -425,33 +427,41 @@ jobs:
         name: Assert the output set equals the input set (+ our signatures)
         if: steps.gate0.outputs.gate != '5'
         shell: bash
+        env:
+          ARCHIVE_GLOB: ${{ inputs.archive-glob }}
         run: |
-          set -uo pipefail
-          in="$RUNNER_TEMP/catboy-input.files"
+          set +e -uo pipefail   # every failure below is an explicit exit
+          in="$RUNNER_TEMP/catboy-input.z"
           [ -f "$in" ] || { echo "::error::no recorded input set; refusing to attest or upload"; exit 1; }
-          now=$(find dist -type f -printf '%P\n' | LC_ALL=C sort)
-          missing=$(LC_ALL=C comm -23 "$in" <(printf '%s\n' "$now" | sed '/^$/d'))
-          bad=""
-          while IFS= read -r f; do
-            [ -n "$f" ] || continue
+          declare -A IN=() NOW=()
+          while IFS= read -r -d '' f; do IN["$f"]=1; done < "$in"
+          links=""
+          while IFS= read -r -d '' f; do NOW["$f"]=1; [ -L "dist/$f" ] && links="$links $f"; done \
+            < <(find dist \( -type f -o -type l \) -printf '%P\0' | LC_ALL=C sort -z)
+          # shellcheck disable=SC2053  # $p is a glob from archive-glob: pattern match on purpose
+          is_archive() { local b=${1##*/} p; for p in $ARCHIVE_GLOB; do [[ $b == $p ]] && return 0; done; return 1; }
+          missing=""; bad=""
+          for f in "${!IN[@]}"; do [ -n "${NOW[$f]:-}" ] || missing="$missing $f"; done
+          for f in "${!NOW[@]}"; do
+            [ -n "${IN[$f]:-}" ] && continue
             case "$f" in
               SIGNATURES.md) continue ;;
-              *.p7s.tsr) base=${f%.p7s.tsr} ;;
-              *.p7s)     base=${f%.p7s} ;;
-              *)         base="" ;;
+              # a detached CMS signature only for an ARCHIVE input (PE files are signed in place)
+              *.p7s)     base=${f%.p7s};     [ -n "${IN[$base]:-}" ] && is_archive "$base" && continue ;;
+              # a timestamp token only next to its .p7s
+              *.p7s.tsr) base=${f%.p7s.tsr}; [ -n "${NOW[$base.p7s]:-}" ] && [ -n "${IN[$base]:-}" ] && is_archive "$base" && continue ;;
             esac
-            if [ -n "$base" ] && grep -qxF -- "$base" "$in"; then continue; fi
             bad="$bad $f"
-          done < <(LC_ALL=C comm -13 "$in" <(printf '%s\n' "$now" | sed '/^$/d'))
-          if [ -n "$missing" ] || [ -n "$bad" ]; then
-            echo "::error::output set != input set. missing: ${missing:-none}; unexpected:${bad:- none}. A leftover or injected file must never be signed or uploaded."
+          done
+          if [ -n "$missing$bad$links" ]; then
+            echo "::error::output set != input set. missing:${missing:- none}; unexpected:${bad:- none}; symlinks:${links:- none}. A leftover or injected entry must never be signed or uploaded."
             exit 1
           fi
-          echo "output set OK: $(wc -l < "$in") input file(s), plus only SIGNATURES.md and .p7s/.p7s.tsr for inputs"
+          echo "output set OK: ${#IN[@]} input entr(y/ies); extras only SIGNATURES.md and archive .p7s/.p7s.tsr"
 
       - id: attest
         name: GitHub artifact attestation (independent of the CA)
-        if: inputs.attest && steps.gate0.outputs.gate != '5' && hashFiles('dist/**') != ''
+        if: inputs.attest && steps.gate0.outputs.gate != '5' && steps.assert.outcome == 'success' && hashFiles('dist/**') != ''
         continue-on-error: true
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
@@ -459,7 +469,7 @@ jobs:
 
       - id: upload
         name: Upload the (signed) artifact
-        if: steps.gate0.outputs.gate != '5'
+        if: steps.gate0.outputs.gate != '5' && steps.assert.outcome == 'success'
         continue-on-error: true   # artifact quota must not fail the job
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -485,6 +495,7 @@ jobs:
           SIGN_GATE: ${{ steps.sign.outputs.gate }}
           SIGN_COUNTS: ${{ steps.sign.outputs.counts }}
           UPLOAD_OUTCOME: ${{ steps.upload.outcome }}
+          ASSERT_OUTCOME: ${{ steps.assert.outcome }}
           ARTIFACT_NAME: ${{ inputs.artifact-name }}
           STRICT: ${{ inputs.strict }}
         run: |
@@ -496,6 +507,8 @@ jobs:
             elif [ "$SIGN_OUTCOME" != 'success' ]; then gate=${SIGN_GATE:-3}; reason="signing failed (signed/failed/removed: $SIGN_COUNTS)"
             fi
           fi
+          # An output-set mismatch overrides everything: nothing was attested or uploaded.
+          if [ "${ASSERT_OUTCOME:-}" = 'failure' ]; then gate=6; reason='output set != input set (leftover, injected or missing entry); nothing attested or uploaded'; fi
           art=$ARTIFACT_NAME; [ "$UPLOAD_OUTCOME" = 'success' ] && art="${art}-signed"
           echo "artifact=$art" >> "$GITHUB_OUTPUT"
           if [ -z "$gate" ]; then
@@ -521,5 +534,6 @@ jobs:
                     -H @<(printf 'Authorization: Bearer %s\n' "$CT"; [ -z "$CJWT" ] || printf 'X-GitHub-OIDC: %s\n' "$CJWT") -H 'Content-Type: application/json' -d @- || true
             fi
             unset CT CJWT
+            if [ "${ASSERT_OUTCOME:-}" = 'failure' ]; then echo "::error::catboy-sign: $reason"; exit 1; fi   # red even when not strict
             if [ "$STRICT" = 'true' ]; then echo "::error::strict mode: unsigned release refused (gate $gate)"; exit 1; fi
           fi
