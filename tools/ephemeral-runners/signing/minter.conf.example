@@ -1,0 +1,10 @@
+# Second pn-minter instance for the signing pool (PN_MINTER_CONF=/etc/pn-runner/signing.conf,
+# its own unit + timer, its own STATE file). Same GitHub token handling as the general pool.
+OWNER=your-user
+AGENT_CMD=ssh -o BatchMode=yes -o ConnectTimeout=15 root@signing-host /usr/local/sbin/pn-agent
+ONLY_REPOS=your-user/app            # allowlist: only these repos get a signing runner
+JOB_LABELS_OK=self-hosted,catboy-sign,your-user-signing
+REQUIRE_LABELS=catboy-sign          # only jobs that ask for catboy-sign
+STATE=/var/lib/pn-minter/signing-state.json
+ALERT_MIN=30
+NOTIFY_CMD=

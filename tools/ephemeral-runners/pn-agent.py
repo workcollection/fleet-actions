@@ -23,6 +23,7 @@ import json
 import os
 import re
 import secrets
+import shlex
 import shutil
 import subprocess
 import sys
@@ -44,6 +45,12 @@ DEFAULTS = {
     "LOAD_MAX": "8",
     "TOKEN_DIR": "/run/pn-runner",
     "TOKEN_FILE_MAX_S": "120",
+    # Extra `docker run` arguments, shell-quoted, e.g. a signing identity:
+    # --env-file /etc/catboy/runner.env -v /etc/catboy/runner:/run/catboy:ro
+    "EXTRA_RUN_ARGS": "",
+    # 1 = register with only LABELS (no self-hosted/Linux/X64 defaults), so a job
+    # that asks for e.g. [self-hosted, linux] can never land on this runner.
+    "NO_DEFAULT_LABELS": "",
 }
 PREFIX = "pn-"
 LABEL = "pn.managed"
@@ -186,6 +193,8 @@ def cmd_start(c):
         "-e", f"RUNNER_NAME={name}", "-e", f"LABELS={c['LABELS']}",
         "-e", "EPHEMERAL=1", "-e", "DISABLE_AUTO_UPDATE=1", "-e", "UNSET_CONFIG_VARS=true",
         "-e", "RUNNER_WORKDIR=/tmp/runner/work",
+        *(["-e", "NO_DEFAULT_LABELS=1"] if c["NO_DEFAULT_LABELS"] == "1" else []),
+        *shlex.split(c["EXTRA_RUN_ARGS"]),
         "--entrypoint", "/bin/bash", c["IMAGE"], "-c", WRAPPER,
     ]
     r = docker(*args, check=False)

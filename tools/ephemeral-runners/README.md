@@ -85,3 +85,28 @@ journalctl -t pn-runner/<name>     # one container's runner log (the agent uses 
 | GitHub-hosted runners (`runs-on: ubuntu-latest`) for those jobs only | best | Actions minutes on private repositories |
 | A separate builder host (its own docker daemon, the agent there with `docker.sock` mounted, no other secrets on it) | good: a job that escapes finds nothing of value | one more small host |
 | In-container builders (buildah or kaniko) | medium | workflow changes; does not cover `services:` |
+
+## Dedicated signing pool
+
+The same two scripts run a second, single-slot pool that takes **only** signing jobs, on a host of its own. A second minter instance (`PN_MINTER_CONF=/etc/pn-runner/signing.conf`) feeds a pn-agent on the signing host. See `signing/` for the image and the example configs.
+
+### Trust boundary
+
+| What | Where | Why |
+|---|---|---|
+| GitHub account token | token box only | The signing host sees only 1-hour, one-repo registration tokens, the same as the general pool. |
+| Signing identity (PKI AppRole `role_id` + `secret_id`, issuer, URLs) | signing host `/etc/catboy/runner*`, mounted read-only into the job container | Only the job container on this host can use it. The PKI side binds the `secret_id` to this host's address, and issuance also needs the GitHub OIDC claims of the pinned signing workflow, so a stolen `secret_id` alone cannot sign. |
+| docker.sock, other host mounts, other runners | none | A job that escapes its container finds only the signing identity. Nothing else lives on this host. |
+
+### Which jobs can reach the signing runner
+
+A user account has no runner groups. GitHub gives a queued job to any runner of that repository whose labels cover the job's `runs-on`. So:
+
+1. **Repository allowlist:** `ONLY_REPOS`. Signing runners register only to those repositories.
+2. **No default labels:** `NO_DEFAULT_LABELS=1`. The runner registers with exactly `LABELS`, without `Linux` or `X64`, so `[self-hosted, linux]` jobs can never land on it.
+3. **Required label:** `REQUIRE_LABELS=catboy-sign`. The minter starts a signing runner only for jobs that ask for `catboy-sign`.
+4. **Unsafe-job guard:** if an allowlisted repository has ANY queued job whose labels fit the signing runner's labels without carrying `catboy-sign` (for example a bare `runs-on: self-hosted`), the minter does not start a runner for that repository and pages. Fix the workflow, for example by adding `linux`, before signing resumes there.
+
+Rule for allowlisted repositories: **no job may use a bare `runs-on: self-hosted`.**
+
+`test_minter_labels.py` covers the label routing for both pools.

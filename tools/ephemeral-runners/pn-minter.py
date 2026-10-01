@@ -40,6 +40,15 @@ DEFAULTS = {
     "PUBLIC_EVENTS": "push,workflow_dispatch",
     "EXCLUDE_WORKFLOWS": "",  # comma list of owner/repo:path or owner/repo:path#job name
     "JOB_LABELS_OK": "self-hosted,linux,x64,polo-nyan",
+    # A dedicated pool (e.g. signing) runs its own minter instance with
+    # PN_MINTER_CONF=<its conf> and sets these:
+    #   ONLY_REPOS     serve only these repos (comma list; empty = all).
+    #   REQUIRE_LABELS a job is eligible only if it carries ALL of these labels.
+    # With REQUIRE_LABELS set, a repo is skipped (and paged) while it has ANY queued
+    # job whose labels fit JOB_LABELS_OK but lack REQUIRE_LABELS: GitHub could hand
+    # that job to this pool's runner (a user account has no runner groups).
+    "ONLY_REPOS": "",
+    "REQUIRE_LABELS": "",
     "ALERT_MIN": "30",
     # Page only on a true stall: over ALERT_MIN, the gate was open (free slot AND host
     # load1 < LOAD_MAX) for at least STALL_SHARE of the ticks. A queue that only waits on
@@ -143,6 +152,7 @@ def repos(c, gh, state):
 def queued_jobs(c, gh, repo, public=False):
     """Queued jobs of the repo, each with an 'eligible' verdict and reason."""
     labels_ok = {x.strip().lower() for x in c["JOB_LABELS_OK"].split(",")}
+    required = {x.strip().lower() for x in c["REQUIRE_LABELS"].split(",") if x.strip()}
     public_events = {x.strip() for x in c["PUBLIC_EVENTS"].split(",") if x.strip()}
     excluded = {x.strip() for x in c["EXCLUDE_WORKFLOWS"].split(",") if x.strip()}
     out = []
@@ -155,9 +165,13 @@ def queued_jobs(c, gh, repo, public=False):
                     continue
                 labels = {x.lower() for x in j.get("labels", [])}
                 reason = None
-                if "self-hosted" not in labels:
+                if "self-hosted" not in labels and not (required and labels & required):
                     continue  # GitHub-hosted job, not ours
-                if not labels <= labels_ok:
+                if required and labels <= labels_ok and not required <= labels:
+                    reason = "UNSAFE: fits this pool's runner labels without " + ",".join(sorted(required))
+                elif required and not required <= labels:
+                    continue  # not this pool's job
+                elif not labels <= labels_ok:
                     reason = "labels " + ",".join(sorted(labels - labels_ok))
                 elif f"{repo}:{run['path']}" in excluded or \
                         f"{repo}:{run['path']}#{j['name']}" in excluded:
@@ -230,9 +244,19 @@ def main():
 
     ok, public = repos(c, gh, state)
     allow = {x.strip() for x in c["ALLOW_PUBLIC"].split(",") if x.strip()}
+    only = {x.strip() for x in c["ONLY_REPOS"].split(",") if x.strip()}
+    if only:
+        ok = [r for r in ok if r in only]
     jobs = []
     for repo in ok:
         jobs += queued_jobs(c, gh, repo, public=repo in allow)
+    # A repo with an UNSAFE job gets no runner from this pool until that job is gone.
+    unsafe = {j["repo"] for j in jobs if (j["reason"] or "").startswith("UNSAFE")}
+    for repo in sorted(unsafe):
+        notify(c, state, f"unsafe:{repo}", f"pn-minter: {repo} has a queued job that could land on the "
+               f"{c['REQUIRE_LABELS']} runner without carrying that label; not starting one there.")
+    jobs = [dict(j, eligible=False, reason=j["reason"] or "repo has an UNSAFE job")
+            if j["repo"] in unsafe else j for j in jobs]
 
     if mode == "--check":
         print(f"host load1={status['load1']} disk_free={status['disk_free_gb']} GB "
