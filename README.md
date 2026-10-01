@@ -153,7 +153,7 @@ jobs:
   build:   # … uploads dist/ as artifact "binaries"
   sign:
     needs: build
-    uses: workcollection/fleet-actions/.github/workflows/catboy-sign.yml@v2.1.4
+    uses: workcollection/fleet-actions/.github/workflows/catboy-sign.yml@v2.1.6
     with: { artifact-name: binaries, runs-on: self-hosted }
   release:
     needs: sign
@@ -184,6 +184,14 @@ openssl ts -verify -data app.zip.p7s -in app.zip.p7s.tsr -CAfile r0.crt -untrust
 
 The `.p7s` is signed by a 1-hour certificate. The timestamp token is what keeps it valid
 afterwards: verify the CMS at the token's `Time stamp`, then verify the token itself.
+
+### Advisory: artifacts signed by catboy-sign 2.1.5 or earlier
+
+catboy-sign up to and including **2.1.5** never emptied `dist/`. On a **long-lived** self-hosted runner, the workspace survives between jobs, and `download-artifact` adds to it. So a signing run could sign and upload files left behind by an **earlier run** of the same repository: a branch build, a PR build, or an earlier pass. Measured 2026-10-01: a netpaw `v0.13.0` tag run signed seven leftover files under the release identity. The repository's own guard caught it, and nothing was published.
+
+- **Fixed in 2.1.6:** every run starts from an empty `dist/`. Pin `@v2.1.6` or later. (Ephemeral and GitHub-hosted runners were never affected.)
+- **What to do:** treat any artifact signed by 2.1.5 or earlier on a long-lived runner as unverified until its file list and hashes match the build that produced it. Re-sign or re-release it otherwise.
+- **From 2.1.7:** catboy-sign asserts before attesting or uploading that the output is exactly the input set plus its own signatures. It also refuses to sign (gate 3) when `osslsigncode` is missing or older than 2.13.
 
 ## Migrating a repo
 

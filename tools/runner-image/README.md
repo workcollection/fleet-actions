@@ -19,3 +19,17 @@ Recreating every runner aborts the jobs running on them. So:
 3. Recreate the runners.
 4. Check `osslsigncode --version` inside each runner.
 5. Restart the gate.
+
+## Native (non-docker) runners: dpkg-divert
+
+Runners that run natively on a host (systemd units, for example `runner-pve-r1`/`-r2`) have no image to rebuild. Their `.path` is usually `/sbin:/bin:/usr/sbin:/usr/bin`, which has no `/usr/local/bin`. So the 2.14 binary goes to **`/usr/bin/osslsigncode`**, behind a diversion:
+
+```sh
+dpkg-divert --local --rename --divert /usr/bin/osslsigncode.distrib --add /usr/bin/osslsigncode
+install -m 0755 osslsigncode-2.14 /usr/bin/osslsigncode   # e.g. copied out of the image: docker cp $(docker create <image>):/usr/local/bin/osslsigncode .
+```
+
+- **What the diversion does:** apt still owns its package, but upgrades write to `.distrib`, so an `apt upgrade` can no longer silently replace 2.14 with the distro's 2.8.
+- **Check:** `dpkg-divert --list | grep osslsigncode` shows it, and `PATH=$(cat <runner>/.path) osslsigncode --version` shows what jobs see.
+- **Undo:** `rm /usr/bin/osslsigncode && dpkg-divert --rename --remove /usr/bin/osslsigncode`.
+- **Binary compatibility:** the binary from this image is dynamically linked for Ubuntu noble. It runs on noble hosts; check `ldd` elsewhere.
