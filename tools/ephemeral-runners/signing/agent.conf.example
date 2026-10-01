@@ -1,6 +1,6 @@
 # /etc/pn-runner/agent.conf on the SIGNING host (a host of its own: no other runners,
 # no docker.sock in any container, nothing else of value on it).
-IMAGE=pn-sign-runner:1
+IMAGE=pn-sign-runner:1          # docker build -t pn-sign-runner:1 tools/runner-image
 OWNER=your-user
 # Exactly ONE unique label, no self-hosted: only a job with runs-on: your-user-signing can land here.
 LABELS=your-user-signing
