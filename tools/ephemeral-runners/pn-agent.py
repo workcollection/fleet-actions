@@ -149,6 +149,25 @@ def disk_free_gb(path="/var/lib/docker"):
     return shutil.disk_usage(p).free / 1e9
 
 
+def extra_run_args(raw):
+    """EXTRA_RUN_ARGS, restricted to what a signing identity needs:
+    `--env-file <abs path>` and `-v <abs src>:<abs dst>:ro` pairs. Anything else
+    (a docker.sock mount, --privileged, a rw mount, --network host...) is an error."""
+    args = shlex.split(raw)
+    if len(args) % 2:
+        raise ValueError(f"EXTRA_RUN_ARGS: odd number of words: {args}")
+    for flag, val in zip(args[0::2], args[1::2]):
+        if flag == "--env-file" and val.startswith("/"):
+            continue
+        parts = val.split(":")
+        if flag == "-v" and len(parts) == 3 and parts[2] == "ro" \
+                and parts[0].startswith("/") and parts[1].startswith("/") \
+                and "docker.sock" not in val:
+            continue
+        raise ValueError(f"EXTRA_RUN_ARGS: only '--env-file /path' and '-v /src:/dst:ro' are allowed, got '{flag} {val}'")
+    return args
+
+
 def cmd_start(c):
     fields = {}
     for line in sys.stdin.read().splitlines():
@@ -156,6 +175,11 @@ def cmd_start(c):
             k, v = line.split("=", 1)
             fields[k.strip()] = v.strip()
     repo, token = fields.get("REPO", ""), fields.get("RUNNER_TOKEN", "")
+    try:
+        extra = extra_run_args(c["EXTRA_RUN_ARGS"])
+    except ValueError as e:
+        log(f"start: refusing, {e}")
+        return 2
     owner = c["OWNER"]
     if not re.fullmatch(rf"{re.escape(owner)}/[A-Za-z0-9._-]+", repo) or not token:
         log("start: bad input (REPO or RUNNER_TOKEN missing or invalid)")
@@ -194,7 +218,7 @@ def cmd_start(c):
         "-e", "EPHEMERAL=1", "-e", "DISABLE_AUTO_UPDATE=1", "-e", "UNSET_CONFIG_VARS=true",
         "-e", "RUNNER_WORKDIR=/tmp/runner/work",
         *(["-e", "NO_DEFAULT_LABELS=1"] if c["NO_DEFAULT_LABELS"] == "1" else []),
-        *shlex.split(c["EXTRA_RUN_ARGS"]),
+        *extra,
         "--entrypoint", "/bin/bash", c["IMAGE"], "-c", WRAPPER,
     ]
     r = docker(*args, check=False)

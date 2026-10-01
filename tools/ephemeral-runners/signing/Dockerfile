@@ -1,9 +1,29 @@
 # Runner image for the dedicated signing pool: the general runner image plus the tools
-# catboy-sign.yml needs (curl, jq, openssl are already in the base; osslsigncode is not).
-# Pin the base by digest; build on the signing host: docker build -t pn-sign-runner:1 .
-ARG BASE=myoung34/github-runner:ubuntu-noble
-FROM ${BASE}
+# catboy-sign.yml needs. curl, jq and openssl are in the base. osslsigncode is built from
+# source: Ubuntu noble ships 2.8, and catboy-sign warns below 2.13.
+# Build on the signing host: docker build -t pn-sign-runner:1 .
+ARG BASE=myoung34/github-runner@sha256:91d2574e601b66d64ed987b76aea9bf565d4cd31da703ddfc0ec9c6b4ed446e9
+ARG OSSLSIGNCODE_VERSION=2.14
+ARG OSSLSIGNCODE_SHA256=0f033fd6069387d2e489fbd2187e62f624764eb8c2758ee94e3e793e5150b5c5
+
+FROM ${BASE} AS osslsigncode
+ARG OSSLSIGNCODE_VERSION
+ARG OSSLSIGNCODE_SHA256
 RUN apt-get update \
- && apt-get install -y --no-install-recommends osslsigncode \
- && rm -rf /var/lib/apt/lists/* \
- && command -v curl jq openssl osslsigncode
+ && apt-get install -y --no-install-recommends build-essential cmake libssl-dev libcurl4-openssl-dev zlib1g-dev ca-certificates curl \
+ && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+# The tag archive is pinned by its sha256 (the release ships no source tarball).
+RUN curl -fsSL -o osslsigncode.tar.gz "https://github.com/mtrojnar/osslsigncode/archive/refs/tags/${OSSLSIGNCODE_VERSION}.tar.gz" \
+ && echo "${OSSLSIGNCODE_SHA256}  osslsigncode.tar.gz" | sha256sum -c - \
+ && tar xzf osslsigncode.tar.gz --strip-components=1 \
+ && cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
+ && cmake --build build -j"$(nproc)" \
+ && install -m 0755 build/osslsigncode /usr/local/bin/osslsigncode
+
+FROM ${BASE}
+ARG OSSLSIGNCODE_VERSION
+COPY --from=osslsigncode /usr/local/bin/osslsigncode /usr/local/bin/osslsigncode
+RUN command -v curl jq openssl osslsigncode \
+ && osslsigncode --version | grep -q "osslsigncode ${OSSLSIGNCODE_VERSION}," \
+ && osslsigncode --version | head -1

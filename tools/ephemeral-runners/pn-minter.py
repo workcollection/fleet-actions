@@ -149,6 +149,12 @@ def repos(c, gh, state):
     return ok, public
 
 
+def served_repos(c, repos_ok):
+    """Apply the ONLY_REPOS allowlist (empty = every repo in repos_ok)."""
+    only = {x.strip() for x in c["ONLY_REPOS"].split(",") if x.strip()}
+    return [r for r in repos_ok if r in only] if only else list(repos_ok)
+
+
 def queued_jobs(c, gh, repo, public=False):
     """Queued jobs of the repo, each with an 'eligible' verdict and reason."""
     labels_ok = {x.strip().lower() for x in c["JOB_LABELS_OK"].split(",")}
@@ -244,9 +250,7 @@ def main():
 
     ok, public = repos(c, gh, state)
     allow = {x.strip() for x in c["ALLOW_PUBLIC"].split(",") if x.strip()}
-    only = {x.strip() for x in c["ONLY_REPOS"].split(",") if x.strip()}
-    if only:
-        ok = [r for r in ok if r in only]
+    ok = served_repos(c, ok)
     jobs = []
     for repo in ok:
         jobs += queued_jobs(c, gh, repo, public=repo in allow)
