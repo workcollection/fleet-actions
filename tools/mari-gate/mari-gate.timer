@@ -1,0 +1,10 @@
+[Unit]
+Description=Run mari-gate every 30 seconds
+
+[Timer]
+OnBootSec=2min
+OnUnitInactiveSec=30s
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,10 @@
+[Unit]
+Description=mari-gate: cap and load-gate the long-lived runner pool
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/mari-gate
+TimeoutStartSec=300
+SyslogIdentifier=mari-gate
