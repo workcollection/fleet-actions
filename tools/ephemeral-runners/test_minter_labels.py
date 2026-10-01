@@ -60,4 +60,8 @@ check("agent: docker.sock refused",            args_ok("-v /var/run/docker.sock:
 check("agent: --privileged refused",           args_ok("--privileged --env-file /x"), False)
 check("agent: relative path refused",          args_ok("--env-file runner.env"), False)
 check("agent: --network host refused",         args_ok("--network host"), False)
+check("agent: --add-host name:ipv4 accepted",   args_ok("--env-file /e -v /a:/b:ro --add-host ca.example.org:10.0.0.63 --add-host tsa.example.org:10.20.0.1"), True)
+check("agent: --add-host without ip refused",   args_ok("--add-host ca.example.org"), False)
+check("agent: --add-host bad ip refused",       args_ok("--add-host ca.example.org:999.1.1.1"), False)
+check("agent: --add-host host-gateway refused", args_ok("--add-host ca.example.org:host-gateway"), False)
 sys.exit(0 if all(results) else 1)
