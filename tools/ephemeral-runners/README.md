@@ -88,7 +88,7 @@ journalctl -t pn-runner/<name>     # one container's runner log (the agent uses 
 
 ## Dedicated signing pool
 
-The same two scripts run a second, single-slot pool that takes **only** signing jobs, on a host of its own. A second minter instance (`PN_MINTER_CONF=/etc/pn-runner/signing.conf`) feeds a pn-agent on the signing host. See `signing/` for the image and the example configs.
+The same two scripts run a second, single-slot pool that takes **only** signing jobs, on a host of its own. A second minter instance (`PN_MINTER_CONF=/etc/pn-runner/signing.conf`) feeds a pn-agent on the signing host. See `signing/` for the example configs; the image is `tools/runner-image/Dockerfile` (built as `pn-sign-runner:1`).
 
 ### Trust boundary
 
