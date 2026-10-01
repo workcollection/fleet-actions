@@ -101,7 +101,7 @@ permissions:
   attestations: write
 
 env:
-  CATBOY_SIGN_VERSION: 2.1.6   # the User-Agent names it; bump with every release tag
+  CATBOY_SIGN_VERSION: 2.1.7   # the User-Agent names it; bump with every release tag
 
 jobs:
   sign:
@@ -169,10 +169,8 @@ jobs:
             *) echo "gate=1" >> "$GITHUB_OUTPUT"; echo "reason=catboy-sign signs release tags only (this run: $GITHUB_REF). The OpenBao login role binds ref refs/tags/*, so a branch or PR build cannot sign." >> "$GITHUB_OUTPUT"; exit 0 ;;
           esac
           for t in curl jq openssl; do command -v "$t" >/dev/null || { echo "gate=3" >> "$GITHUB_OUTPUT"; echo "reason=missing tool $t" >> "$GITHUB_OUTPUT"; exit 0; }; done
-          if ! command -v osslsigncode >/dev/null; then
-            (sudo -n apt-get install -y -qq osslsigncode >/dev/null 2>&1 || apt-get install -y -qq osslsigncode >/dev/null 2>&1) || true
-            command -v osslsigncode >/dev/null || { echo "gate=3" >> "$GITHUB_OUTPUT"; echo "reason=osslsigncode not installed on runner ${RUNNER_NAME:-?}" >> "$GITHUB_OUTPUT"; exit 0; }
-          fi
+          # No apt fallback: distro packages lag (noble ships 2.8). The runner image must carry it.
+          command -v osslsigncode >/dev/null || { echo "gate=3" >> "$GITHUB_OUTPUT"; echo "reason=osslsigncode not installed on runner ${RUNNER_NAME:-?} (the runner image must carry >= 2.13)" >> "$GITHUB_OUTPUT"; exit 0; }
           # Floor 2.13 (memory-safety fixes). A gate, not a warning: no signing below it.
           v=$(osslsigncode --version 2>&1 | grep -oE '[0-9]+\.[0-9]+' | head -1)
           [ "$(printf '%s\n2.13\n' "${v:-0}" | sort -V | head -1)" = "2.13" ] || { echo "gate=3" >> "$GITHUB_OUTPUT"; echo "reason=osslsigncode ${v:-?} on runner ${RUNNER_NAME:-?} is below the 2.13 floor; use a runner image that carries >= 2.13" >> "$GITHUB_OUTPUT"; exit 0; }
