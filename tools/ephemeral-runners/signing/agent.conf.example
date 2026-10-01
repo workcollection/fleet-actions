@@ -1,0 +1,18 @@
+# /etc/pn-runner/agent.conf on the SIGNING host (a host of its own: no other runners,
+# no docker.sock in any container, nothing else of value on it).
+IMAGE=pn-sign-runner:1
+OWNER=your-user
+# Exactly ONE unique label, no self-hosted: only a job with runs-on: your-user-signing can land here.
+LABELS=your-user-signing
+NO_DEFAULT_LABELS=1          # no self-hosted/Linux/X64 defaults
+MAX_JOBS=1
+CPUS=2
+MEMORY=3g
+PIDS=2048
+DISK_MAX_GB=6
+JOB_TIMEOUT_MIN=30
+IDLE_MAX_MIN=10
+LOAD_MAX=8
+# The signing identity installed by the PKI onboarding: env (role_id, issuer, URLs) and a
+# directory with the secret_id file, read-only. Nothing else from the host is mounted.
+EXTRA_RUN_ARGS=--env-file /etc/catboy/runner.env -v /etc/catboy/runner:/run/catboy:ro

@@ -50,6 +50,16 @@ jobs:
           # Composite action files are not workflows; actionlint only reads workflows.
           /tmp/actionlint -color
 
+  tools-tests:
+    name: Tool tests (runner minter/agent, mari-gate)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: pn-minter label routing, repo allowlist, pn-agent EXTRA_RUN_ARGS
+        run: python3 tools/ephemeral-runners/test_minter_labels.py
+      - name: mari-gate scenarios (stub docker)
+        run: bash tools/mari-gate/test.sh
+
   smoke:
     name: Smoke - every composite actually runs
     runs-on: ubuntu-latest
