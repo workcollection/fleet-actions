@@ -149,15 +149,24 @@ def disk_free_gb(path="/var/lib/docker"):
     return shutil.disk_usage(p).free / 1e9
 
 
+# --add-host <dns-name>:<IPv4> (docker also takes IPv6, but the signing pins are IPv4).
+ADD_HOST_RE = re.compile(r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+:"
+                         r"(25[0-5]|2[0-4]\d|1?\d?\d)(\.(25[0-5]|2[0-4]\d|1?\d?\d)){3}$")
+
+
 def extra_run_args(raw):
     """EXTRA_RUN_ARGS, restricted to what a signing identity needs:
-    `--env-file <abs path>` and `-v <abs src>:<abs dst>:ro` pairs. Anything else
-    (a docker.sock mount, --privileged, a rw mount, --network host...) is an error."""
+    `--env-file <abs path>`, `-v <abs src>:<abs dst>:ro` and `--add-host <name>:<ip>`
+    pairs (the last pins e.g. the CA/TSA names when public DNS points elsewhere).
+    Anything else (a docker.sock mount, --privileged, a rw mount, --network host...)
+    is an error."""
     args = shlex.split(raw)
     if len(args) % 2:
         raise ValueError(f"EXTRA_RUN_ARGS: odd number of words: {args}")
     for flag, val in zip(args[0::2], args[1::2]):
         if flag == "--env-file" and val.startswith("/"):
+            continue
+        if flag == "--add-host" and ADD_HOST_RE.match(val):
             continue
         parts = val.split(":")
         if flag == "-v" and len(parts) == 3 and parts[2] == "ro" \
