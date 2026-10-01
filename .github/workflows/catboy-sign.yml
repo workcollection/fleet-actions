@@ -132,6 +132,15 @@ jobs:
           name: ${{ inputs.artifact-name }}
           path: dist
 
+      - name: Record the input set
+        if: steps.fetch.outcome == 'success'
+        shell: bash
+        run: |
+          # The file list of THIS run's artifact. The assert step before attest/upload
+          # checks that the output is exactly this set plus the signatures we add.
+          [ -d dist ] && find dist -type f -printf '%P\n' | LC_ALL=C sort > "$RUNNER_TEMP/catboy-input.files"
+          echo "input files: $(wc -l < "$RUNNER_TEMP/catboy-input.files" 2>/dev/null || echo 0)"
+
       - id: gate0
         name: Gate 0 — is a CA configured on this runner?
         shell: bash
@@ -164,6 +173,9 @@ jobs:
             (sudo -n apt-get install -y -qq osslsigncode >/dev/null 2>&1 || apt-get install -y -qq osslsigncode >/dev/null 2>&1) || true
             command -v osslsigncode >/dev/null || { echo "gate=3" >> "$GITHUB_OUTPUT"; echo "reason=osslsigncode not installed on runner ${RUNNER_NAME:-?}" >> "$GITHUB_OUTPUT"; exit 0; }
           fi
+          # Floor 2.13 (memory-safety fixes). A gate, not a warning: no signing below it.
+          v=$(osslsigncode --version 2>&1 | grep -oE '[0-9]+\.[0-9]+' | head -1)
+          [ "$(printf '%s\n2.13\n' "${v:-0}" | sort -V | head -1)" = "2.13" ] || { echo "gate=3" >> "$GITHUB_OUTPUT"; echo "reason=osslsigncode ${v:-?} on runner ${RUNNER_NAME:-?} is below the 2.13 floor; use a runner image that carries >= 2.13" >> "$GITHUB_OUTPUT"; exit 0; }
           echo "gate=" >> "$GITHUB_OUTPUT"; echo "reason=" >> "$GITHUB_OUTPUT"
 
       - id: login
@@ -355,7 +367,6 @@ jobs:
           TS=(); [ -n "${CATBOY_TSA_URL:-}" ] && TS=(-ts "$CATBOY_TSA_URL") || echo "::warning::CATBOY_TSA_URL unset — signatures carry no timestamp and expire with the 1-hour leaf"
           CRL=(); [ -s "$RUNNER_TEMP/crls.pem" ] && CRL=(-CRLfile "$RUNNER_TEMP/crls.pem")
           TSAV=(); [ -s "$RUNNER_TEMP/tsa-anchors.pem" ] && TSAV=(-TSA-CAfile "$RUNNER_TEMP/tsa-anchors.pem" -TSA-CRLfile "$RUNNER_TEMP/tsca.crl")
-          v=$(osslsigncode --version 2>&1 | grep -oE '[0-9]+\.[0-9]+' | head -1); [ "$(printf '%s\n2.13\n' "$v" | sort -V | head -1)" = "2.13" ] || echo "::warning::osslsigncode $v < 2.13 on this runner (memory-safety fixes); the runner image should carry >= 2.13"
           cat "$RUNNER_TEMP/sign.crt" "$RUNNER_TEMP/chain.pem" > "$RUNNER_TEMP/signchain.pem"
           # the TSA chain for verifying CMS timestamp tokens: timestamp CA + the branch chain (anchor: the pinned root)
           [ -s "$RUNNER_TEMP/tsca.crt" ] && cat "$RUNNER_TEMP/tsca.crt" "$RUNNER_TEMP/chain.pem" > "$RUNNER_TEMP/tsa-untrusted.pem"
@@ -411,6 +422,34 @@ jobs:
             curl -sS -o /dev/null -w 'revoke OpenBao token: %{http_code}\n' "${CA_OPT[@]}" -X POST -H @<(printf 'X-Vault-Token: %s\n' "$BAO_TOKEN") "$CATBOY_BAO_ADDR/v1/auth/token/revoke-self" || true
           fi
           true
+
+      - id: assert
+        name: Assert the output set equals the input set (+ our signatures)
+        if: steps.gate0.outputs.gate != '5'
+        shell: bash
+        run: |
+          set -uo pipefail
+          in="$RUNNER_TEMP/catboy-input.files"
+          [ -f "$in" ] || { echo "::error::no recorded input set; refusing to attest or upload"; exit 1; }
+          now=$(find dist -type f -printf '%P\n' | LC_ALL=C sort)
+          missing=$(LC_ALL=C comm -23 "$in" <(printf '%s\n' "$now" | sed '/^$/d'))
+          bad=""
+          while IFS= read -r f; do
+            [ -n "$f" ] || continue
+            case "$f" in
+              SIGNATURES.md) continue ;;
+              *.p7s.tsr) base=${f%.p7s.tsr} ;;
+              *.p7s)     base=${f%.p7s} ;;
+              *)         base="" ;;
+            esac
+            if [ -n "$base" ] && grep -qxF -- "$base" "$in"; then continue; fi
+            bad="$bad $f"
+          done < <(LC_ALL=C comm -13 "$in" <(printf '%s\n' "$now" | sed '/^$/d'))
+          if [ -n "$missing" ] || [ -n "$bad" ]; then
+            echo "::error::output set != input set. missing: ${missing:-none}; unexpected:${bad:- none}. A leftover or injected file must never be signed or uploaded."
+            exit 1
+          fi
+          echo "output set OK: $(wc -l < "$in") input file(s), plus only SIGNATURES.md and .p7s/.p7s.tsr for inputs"
 
       - id: attest
         name: GitHub artifact attestation (independent of the CA)
