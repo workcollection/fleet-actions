@@ -101,7 +101,7 @@ permissions:
   attestations: write
 
 env:
-  CATBOY_SIGN_VERSION: 2.1.5   # the User-Agent names it; bump with every release tag
+  CATBOY_SIGN_VERSION: 2.1.6   # the User-Agent names it; bump with every release tag
 
 jobs:
   sign:
@@ -116,6 +116,14 @@ jobs:
       hierarchy: ${{ steps.report.outputs.hierarchy }}
       root-fingerprint: ${{ steps.report.outputs.root-fingerprint }}
     steps:
+      - name: Start from an empty dist/
+        # A long-lived runner keeps its workspace between jobs, and download-artifact ADDS
+        # files to an existing directory. Without this, a later run signs and uploads files
+        # an earlier run left behind (netpaw rc.2, 2026-10-01: the pkg pass shipped the bin
+        # pass's six exes). Only files from this run's artifact may be signed.
+        shell: bash
+        run: rm -rf -- "$GITHUB_WORKSPACE/dist"
+
       - id: fetch
         name: Build artifact
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
