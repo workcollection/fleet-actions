@@ -171,20 +171,36 @@ The repo identity is this run's GitHub OIDC token, which the CA binds to
 **this file at a `v2.*` tag** (`job_workflow_ref`), never to a branch — which is why the
 immutable-tag ruleset matters for this workflow more than for any other.
 
-**Verifying a signed release** (staging or production root; get `r0.crt`/`r1.crt`, `t0.crt`
-and `cb0.crt` from `http://pki.catboy.systems/certs/`, and check the root's SHA-256 against the
-`hierarchy`/`root-fingerprint` outputs and `SIGNATURES.md`):
+**Verifying a signed release** (staging or production root: `r0` is staging, `r1` production).
+pki-web serves `certs/<name>.crt` as **DER** on purpose (it is the AIA URL; PEM copies at
+`certs/<name>.pem` are being added in `polo-nyan/catboy-pki`). Every tool below wants PEM, and
+a DER file `cat`'ed into a PEM bundle parses to **nothing**. So convert whatever arrives, and stop if a file holds no
+certificate. Then check the root's SHA-256 against the `root-fingerprint` output and
+`SIGNATURES.md`:
 
 ```sh
+#!/bin/sh
+set -eu
+PKI=http://pki.catboy.systems
+pem() {   # pem <name>: fetch certs/<name>.crt, write <name>.pem (DER or PEM in), fail if empty
+  curl -fsS -o "$1.crt" "$PKI/certs/$1.crt"
+  openssl x509 -inform DER -in "$1.crt" -out "$1.pem" 2>/dev/null || openssl x509 -in "$1.crt" -out "$1.pem"
+  [ "$(grep -c 'BEGIN CERTIFICATE' "$1.pem")" -ge 1 ] || { echo "no certificate parsed from $1.crt" >&2; exit 1; }
+}
+for c in r0 cb0 t0; do pem "$c"; done
+openssl x509 -in r0.pem -outform DER | sha256sum   # must equal root-fingerprint
+
 # Windows binaries: Authenticode + its RFC 3161 timestamp (checked at the timestamp time, CRLs fetched)
-cat r0.crt cb0.crt t0.crt > tsa-ca.pem
-osslsigncode verify -in app.exe -CAfile r0.crt -TSA-CAfile tsa-ca.pem
+cat r0.pem cb0.pem t0.pem > tsa-ca.pem
+[ "$(grep -c 'BEGIN CERTIFICATE' tsa-ca.pem)" -eq 3 ]
+osslsigncode verify -in app.exe -CAfile r0.pem -TSA-CAfile tsa-ca.pem
 
 # Archives: detached CMS, then the RFC 3161 token over the signature bytes (.p7s.tsr, since v2.1.4)
-openssl cms -verify -binary -inform DER -in app.zip.p7s -content app.zip -CAfile r0.crt \
+openssl cms -verify -binary -inform DER -in app.zip.p7s -content app.zip -CAfile r0.pem \
   -no-CApath -no-CAstore -purpose any -attime "$(date -d "$(openssl ts -reply -in app.zip.p7s.tsr -text | sed -n 's/^Time stamp: //p')" +%s)" -out /dev/null
-cat t0.crt cb0.crt > tsa-untrusted.pem
-openssl ts -verify -data app.zip.p7s -in app.zip.p7s.tsr -CAfile r0.crt -untrusted tsa-untrusted.pem
+cat t0.pem cb0.pem > tsa-untrusted.pem
+[ "$(grep -c 'BEGIN CERTIFICATE' tsa-untrusted.pem)" -eq 2 ]
+openssl ts -verify -data app.zip.p7s -in app.zip.p7s.tsr -CAfile r0.pem -untrusted tsa-untrusted.pem
 ```
 
 The `.p7s` is signed by a 1-hour certificate. The timestamp token is what keeps it valid
