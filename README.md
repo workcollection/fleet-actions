@@ -172,9 +172,9 @@ The repo identity is this run's GitHub OIDC token, which the CA binds to
 immutable-tag ruleset matters for this workflow more than for any other.
 
 **Verifying a signed release** (staging or production root: `r0` is staging, `r1` production).
-pki-web serves `certs/<name>.crt` as **DER** on purpose (it is the AIA URL; PEM copies at
-`certs/<name>.pem` are being added in `polo-nyan/catboy-pki`). Every tool below wants PEM, and
-a DER file `cat`'ed into a PEM bundle parses to **nothing**. So convert whatever arrives, and stop if a file holds no
+pki-web serves `certs/<name>.crt` as **DER** on purpose (it is the AIA URL), and the same
+certificate as PEM at `certs/<name>.pem`. Every tool below wants PEM, and a DER file `cat`'ed
+into a PEM bundle parses to **nothing**. So convert whatever arrives, and stop if a file holds no
 certificate. Then check the root's SHA-256 against the `root-fingerprint` output and
 `SIGNATURES.md`:
 
