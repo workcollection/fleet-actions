@@ -6,3 +6,5 @@ LOAD_MAX=8                     # park idle runners while the host 1-minute load 
 HOLD_S=120                     # wait this long after the last park before unparking
 LAUNCH_CMD=/usr/local/sbin/run-runners.sh   # called as: LAUNCH_CMD <index>
 MODE=observe                   # observe first; switch to enforce when the log looks right
+OTHER_JOB_PREFIX=              # optional: containers of another runner pool on this host (name prefix);
+                               # each counts against CAP as one job, so CAP = jobs on the host

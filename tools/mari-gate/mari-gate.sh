@@ -14,6 +14,9 @@
 # Accepted race: a job that GitHub assigns in the second between the idle check and the
 # stop fails and needs a rerun.
 # MODE=observe only logs what enforce would do.
+# OTHER_JOB_PREFIX (optional): running containers whose name starts with it are jobs of another
+# runner pool on the same host (one container = one job). They count against CAP, so CAP means
+# "jobs on this host": this pool gets CAP minus their number. The gate never stops them.
 set -uo pipefail
 RUNNER_PREFIX=runner-
 POOL_SIZE=10
@@ -24,6 +27,7 @@ LAUNCH_CMD=/usr/local/sbin/run-runners.sh
 STATE=/var/lib/mari-gate
 LOADAVG=/proc/loadavg          # tests point this at a fixture
 MODE=enforce
+OTHER_JOB_PREFIX=
 CONF=${MARI_GATE_CONF:-/etc/mari-gate.conf}
 [ -f "$CONF" ] && . "$CONF"
 mkdir -p "$STATE/parked"
@@ -36,6 +40,8 @@ name(){ echo "${RUNNER_PREFIX}$1"; }
 running(){ local out; out=$(docker ps --format '{{.Names}}'); grep -qx "$(name "$1")" <<<"$out"; }
 # A runner is busy while a Runner.Worker process (one job) is alive inside its container.
 busy(){ local out; out=$(docker top "$(name "$1")" -eo pid,comm 2>/dev/null); [[ $out == *Runner.Worker* ]]; }
+others(){ [ -n "$OTHER_JOB_PREFIX" ] || { echo 0; return; }
+  local out; out=$(docker ps --format '{{.Names}}'); awk -v p="$OTHER_JOB_PREFIX" 'index($0, p) == 1 { n++ } END { print n + 0 }' <<<"$out"; }
 park(){
   log "park $(name "$1") ($2) [$MODE]"
   [ "$MODE" = enforce ] || return 0
@@ -50,30 +56,32 @@ unpark(){
 
 load=$(cut -d' ' -f1 "$LOADAVG")
 high=$(awk -v l="$load" -v m="$LOAD_MAX" 'BEGIN{print (l >= m) ? 1 : 0}')
+nother=$(others)
+limit=$(( CAP - nother )); [ "$limit" -lt 0 ] && limit=0
 run=(); idle=(); nbusy=0
 for i in $(seq 1 "$POOL_SIZE"); do
   running "$i" || continue
   run+=("$i")
   if busy "$i"; then nbusy=$((nbusy+1)); else idle+=("$i"); fi
 done
-echo "$(date -u +%FT%TZ) load1=$load running=${#run[@]} busy=$nbusy idle=${#idle[@]} cap=$CAP mode=$MODE" > "$STATE/status"
+echo "$(date -u +%FT%TZ) load1=$load running=${#run[@]} busy=$nbusy idle=${#idle[@]} other=$nother cap=$CAP limit=$limit mode=$MODE" > "$STATE/status"
 
 if [ "$high" = 1 ]; then
   for i in "${idle[@]}"; do park "$i" "load1 $load >= $LOAD_MAX"; done
   exit 0
 fi
-# Over the cap: park idle runners, highest index first.
-over=$(( ${#run[@]} - CAP ))
+# Over the limit (CAP minus other jobs): park idle runners, highest index first.
+over=$(( ${#run[@]} - limit ))
 if [ "$over" -gt 0 ]; then
-  for ((k=${#idle[@]}-1; k>=0 && over>0; k--)); do park "${idle[$k]}" "cap $CAP"; over=$((over-1)); done
+  for ((k=${#idle[@]}-1; k>=0 && over>0; k--)); do park "${idle[$k]}" "cap $CAP, other jobs $nother"; over=$((over-1)); done
   exit 0
 fi
 # Under the cap: unpark, lowest index first, after the hold time.
 last=$(cat "$STATE/last_park" 2>/dev/null || echo 0)
 [ $(( $(date +%s) - last )) -lt "$HOLD_S" ] && exit 0
-need=$(( CAP - ${#run[@]} ))
+need=$(( limit - ${#run[@]} ))
 for i in $(seq 1 "$POOL_SIZE"); do
   [ "$need" -gt 0 ] || break
   running "$i" && continue
-  unpark "$i" "load1 $load < $LOAD_MAX, ${#run[@]}/$CAP running"; need=$((need-1))
+  unpark "$i" "load1 $load < $LOAD_MAX, ${#run[@]}/$limit running (cap $CAP, other jobs $nother)"; need=$((need-1))
 done
