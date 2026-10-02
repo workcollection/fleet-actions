@@ -8,6 +8,11 @@ Use this when a fixed pool of self-hosted runner containers shares a host with w
 | more than `CAP` (6) runners online | park idle runners, highest index first |
 | fewer than `CAP` online, and `HOLD_S` (120 s) since the last park | unpark runners, lowest index first, with your launcher |
 
+**Another runner pool on the same host** (for example ephemeral runners): set `OTHER_JOB_PREFIX` to
+its container name prefix. Each such running container counts as one job against `CAP`, so `CAP`
+means "jobs on this host" and this pool gets `CAP` minus their number (never below 0). The gate
+only counts those containers; it never stops them. Unset (the default) keeps the old behaviour.
+
 - **Park** marks the index in `/var/lib/mari-gate/parked/`, runs `docker stop -t 30` (the runner entrypoint deregisters on SIGTERM) and removes the container.
 - **Unpark** runs `LAUNCH_CMD <index>`, which re-registers the runner, then removes the mark.
 - `/var/lib/mari-gate/status` holds the last decision's numbers. The journal (`journalctl -t mari-gate`) holds every park and unpark.

@@ -7,7 +7,7 @@ mkdir -p "$tmp/bin"
 cat > "$tmp/bin/docker" <<'STUB'
 #!/bin/bash
 case "$1" in
-  ps)  for i in $RUNNING; do echo "runner-$i"; done ;;
+  ps)  for i in $RUNNING; do echo "runner-$i"; done; for o in ${OTHER:-}; do echo "$o"; done ;;
   top) i=${2#runner-}; echo "PID COMMAND"; for b in $BUSY; do [ "$b" = "$i" ] && echo "1 Runner.Worker"; done ;;
   stop|rm) echo "docker $*" >> "$MG/calls" ;;
 esac
@@ -16,9 +16,9 @@ printf '#!/bin/sh\necho "launch $1" >> "$MG/calls"\n' > "$tmp/launch.sh"; chmod 
 fail=0
 # t <name> <load1> <running> <busy> <last_park_age_s|""> <expected stops> <expected launches>
 t(){ export MG=$(mktemp -d -p "$tmp"); : > "$MG/calls"; echo "$2 1 1 1/1 1" > "$MG/loadavg"; mkdir -p "$MG/st"
-  printf 'RUNNER_PREFIX=runner-\nPOOL_SIZE=10\nCAP=6\nLOAD_MAX=8\nHOLD_S=120\nLAUNCH_CMD=%s\nSTATE=%s/st\nLOADAVG=%s/loadavg\nMODE=enforce\n' "$tmp/launch.sh" "$MG" "$MG" > "$MG/conf"
+  printf 'RUNNER_PREFIX=runner-\nPOOL_SIZE=10\nCAP=6\nLOAD_MAX=8\nHOLD_S=120\nLAUNCH_CMD=%s\nSTATE=%s/st\nLOADAVG=%s/loadavg\nMODE=enforce\nOTHER_JOB_PREFIX=%s\n' "$tmp/launch.sh" "$MG" "$MG" "${OPFX:-}" > "$MG/conf"
   [ -n "$5" ] && echo $(( $(date +%s) - $5 )) > "$MG/st/last_park"
-  RUNNING="$3" BUSY="$4" MARI_GATE_CONF="$MG/conf" PATH="$tmp/bin:$PATH" bash "$here/mari-gate.sh" >/dev/null 2>&1
+  RUNNING="$3" BUSY="$4" OTHER="${OTHER:-}" MARI_GATE_CONF="$MG/conf" PATH="$tmp/bin:$PATH" bash "$here/mari-gate.sh" >/dev/null 2>&1
   stops=$(grep 'docker stop' "$MG/calls" | awk '{print $NF}' | sed 's/runner-//' | sort -n | tr '\n' ' ' | sed 's/ $//')
   launches=$(grep launch "$MG/calls" | awk '{print $2}' | sort -n | tr '\n' ' ' | sed 's/ $//')
   if [ "$stops" = "$6" ] && [ "$launches" = "$7" ]; then echo "PASS $1"; else echo "FAIL $1: stops=[$stops] want [$6], launches=[$launches] want [$7]"; fail=1; fi; }
@@ -29,4 +29,15 @@ t "over the cap never parks busy ones"  2.0 "1 2 3 4 5 6 7 8 9 10" "1 2 3 4 5 6 
 t "under the cap after the hold"        2.0 "1 2 3"                "1"                 300 ""               "4 5 6"
 t "under the cap within the hold"       2.0 "1 2 3"                "1"                 30  ""               ""
 t "at the cap does nothing"             2.0 "1 2 3 4 5 6"          ""                  ""  ""               ""
+# Another pool's jobs (OTHER_JOB_PREFIX) count against CAP; the gate never touches them.
+OPFX=pp- OTHER="pp-a pp-b"
+t "other jobs shrink the cap"           2.0 "1 2 3 4 5 6"          ""                  ""  "5 6"            ""
+t "other jobs: busy runners stay"       2.0 "1 2 3 4 5 6"          "1 2 3 4 5"         ""  "6"              ""
+t "other jobs limit the unpark"         2.0 "1 2"                  ""                  300 ""               "3 4"
+OTHER="pp-a pp-b pp-c pp-d pp-e pp-f pp-g"
+t "more other jobs than CAP"            2.0 "1 2"                  "1"                 ""  "2"              ""
+OPFX="" OTHER="pp-a pp-b"
+t "prefix unset ignores others"         2.0 "1 2 3 4 5 6"          ""                  ""  ""               ""
+OPFX=pp- OTHER="xpp-a runner-pp"
+t "prefix must match the name start"    2.0 "1 2 3 4 5 6"          ""                  ""  ""               ""
 exit $fail
