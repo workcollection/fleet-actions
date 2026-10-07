@@ -11,8 +11,10 @@
 # Unpark = LAUNCH_CMD <index> (your launcher: fresh registration and env), then unmark.
 # A relauncher that restarts "missing" runners must skip the indices in $STATE/parked/.
 #
-# Accepted race: a job that GitHub assigns in the second between the idle check and the
-# stop fails and needs a rerun.
+# Race: a job that GitHub assigns between the idle check and the stop fails with no step run
+# (10 min later, 'lost communication'). park() therefore re-checks right before each stop, and a
+# runner counts as busy as soon as it logged 'Running job:' (before Runner.Worker exists). What
+# remains is the sub-second gap between that re-check and the SIGTERM.
 # MODE=observe only logs what enforce would do.
 # A failed unpark logs the launcher's last output line and counts in $STATE/unpark_fail (reset by
 # any successful unpark; shown as unpark_fail= in the status line). At FAIL_ALERT consecutive failures,
@@ -44,11 +46,17 @@ name(){ echo "${RUNNER_PREFIX}$1"; }
 # Capture first, then match: with pipefail, `docker ... | grep -q` fails when grep exits
 # early and docker gets SIGPIPE, which would report a busy runner as idle and park it mid-job.
 running(){ local out; out=$(docker ps --format '{{.Names}}'); grep -qx "$(name "$1")" <<<"$out"; }
-# A runner is busy while a Runner.Worker process (one job) is alive inside its container.
-busy(){ local out; out=$(docker top "$(name "$1")" -eo pid,comm 2>/dev/null); [[ $out == *Runner.Worker* ]]; }
+# A runner is busy while a Runner.Worker process (one job) is alive inside its container, or once
+# its listener logged 'Running job:' with no later 'completed with result' (the job is assigned, the
+# worker not started yet).
+busy(){ local out; out=$(docker top "$(name "$1")" -eo pid,comm 2>/dev/null); [[ $out == *Runner.Worker* ]] && return 0
+  out=$(docker logs --tail 40 "$(name "$1")" 2>&1); out=$(grep -E 'Running job:|completed with result' <<<"$out" | tail -1)
+  [[ $out == *"Running job:"* ]]; }
 others(){ [ -n "$OTHER_JOB_PREFIX" ] || { echo 0; return; }
   local out; out=$(docker ps --format '{{.Names}}'); awk -v p="$OTHER_JOB_PREFIX" 'index($0, p) == 1 { n++ } END { print n + 0 }' <<<"$out"; }
 park(){
+  # The idle list is built once per tick and each stop takes seconds: look again right before this one.
+  if busy "$1"; then log "skip park $(name "$1"): took a job since the idle check"; return 0; fi
   log "park $(name "$1") ($2) [$MODE]"
   [ "$MODE" = enforce ] || return 0
   touch "$STATE/parked/$1"; date +%s > "$STATE/last_park"
