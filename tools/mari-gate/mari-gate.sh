@@ -4,7 +4,9 @@
 #
 # A long-lived runner starts a job whenever GitHub assigns one to it while it is idle and
 # online. So the only way to stop new jobs is to take idle runners offline:
-#   - host load1 >= LOAD_MAX: park every IDLE runner. Busy runners finish their job.
+#   - host load1 >= LOAD_MAX on HIGH_TICKS consecutive ticks: park every IDLE runner. Busy runners
+#     finish their job. A shorter spike only waits (no park, no unpark): parking is the one action
+#     that can kill a job being assigned, so it should not react to a single sample.
 #   - otherwise: park idle runners above CAP, and unpark parked runners up to CAP, but only
 #     HOLD_S after the last park, so a load spike does not flap runners on and off.
 # Park   = mark parked, `docker stop -t 30` (the runner entrypoint deregisters on SIGTERM), rm.
@@ -35,6 +37,7 @@ LOADAVG=/proc/loadavg          # tests point this at a fixture
 MODE=enforce
 OTHER_JOB_PREFIX=
 FAIL_ALERT=10
+HIGH_TICKS=1
 ALERT_CMD=
 CONF=${MARI_GATE_CONF:-/etc/mari-gate.conf}
 [ -f "$CONF" ] && . "$CONF"
@@ -91,9 +94,12 @@ done
 echo "$(date -u +%FT%TZ) load1=$load running=${#run[@]} busy=$nbusy idle=${#idle[@]} other=$nother cap=$CAP limit=$limit unpark_fail=$(cat "$STATE/unpark_fail" 2>/dev/null || echo 0) mode=$MODE" > "$STATE/status"
 
 if [ "$high" = 1 ]; then
-  for i in "${idle[@]}"; do park "$i" "load1 $load >= $LOAD_MAX"; done
+  ht=$(( $(cat "$STATE/high_ticks" 2>/dev/null || echo 0) + 1 )); echo "$ht" > "$STATE/high_ticks"
+  if [ "$ht" -lt "$HIGH_TICKS" ]; then log "load1 $load >= $LOAD_MAX (tick $ht/$HIGH_TICKS): waiting, no park, no unpark"; exit 0; fi
+  for i in "${idle[@]}"; do park "$i" "load1 $load >= $LOAD_MAX, $ht ticks"; done
   exit 0
 fi
+rm -f "$STATE/high_ticks"
 # Over the limit (CAP minus other jobs): park idle runners, highest index first.
 over=$(( ${#run[@]} - limit ))
 if [ "$over" -gt 0 ]; then
