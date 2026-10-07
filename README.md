@@ -154,14 +154,18 @@ jobs:
   sign:
     needs: build
     permissions: { contents: read, id-token: write, attestations: write }
-    uses: workcollection/fleet-actions/.github/workflows/catboy-sign.yml@v2.1.6
-    with: { artifact-name: binaries, runs-on: self-hosted }
+    uses: workcollection/fleet-actions/.github/workflows/catboy-sign.yml@v2.1.8
+    with: { artifact-name: binaries, runs-on: self-hosted }   # retention-days: 3 by default (1-90)
   release:
     needs: sign
     steps:
       - uses: actions/download-artifact@…
         with: { name: ${{ needs.sign.outputs.artifact }}, path: out }
 ```
+
+The signed copy is uploaded as an artifact kept for `retention-days` (default 3, from 2.1.8;
+it used to be a fixed 7). It is only a handoff to your publish job in the same run, so 1 is
+enough when that job runs right after. Every copy counts against the org's Actions storage.
 
 The `sign` job must grant all three permissions, **even with `attest: false`**: the workflow
 requests them at the top level, and GitHub refuses to start a run whose caller grants less
