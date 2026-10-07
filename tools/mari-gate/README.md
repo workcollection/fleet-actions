@@ -8,6 +8,15 @@ Use this when a fixed pool of self-hosted runner containers shares a host with w
 | more than `CAP` (6) runners online | park idle runners, highest index first |
 | fewer than `CAP` online, and `HOLD_S` (120 s) since the last park | unpark runners, lowest index first, with your launcher |
 
+**A launcher that cannot succeed** (deleted local image, expired token) must not look like an
+intentionally parked pool. A failed unpark logs the launcher's last output line and counts in
+`/var/lib/mari-gate/unpark_fail`; any successful unpark resets it. The status line shows it as `unpark_fail=`.
+With `ALERT_CMD` set, it runs with one message argument at `FAIL_ALERT` (10) consecutive failures, and
+again every 12 × `FAIL_ALERT`. If your runner image exists only locally, label it (for example
+`docker build --label org.catboy.keep=true`) and keep it out of any `docker image prune`
+(`--filter label!=org.catboy.keep`). While every runner is parked, nothing uses the image, so
+`prune -a` deletes it.
+
 **Another runner pool on the same host** (for example ephemeral runners): set `OTHER_JOB_PREFIX` to
 its container name prefix. Each such running container counts as one job against `CAP`, so `CAP`
 means "jobs on this host" and this pool gets `CAP` minus their number (never below 0). The gate

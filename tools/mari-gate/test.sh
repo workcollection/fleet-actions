@@ -12,13 +12,15 @@ case "$1" in
   stop|rm) echo "docker $*" >> "$MG/calls" ;;
 esac
 STUB
-printf '#!/bin/sh\necho "launch $1" >> "$MG/calls"\n' > "$tmp/launch.sh"; chmod +x "$tmp/bin/docker" "$tmp/launch.sh"
+printf '#!/bin/sh\necho "launch $1" >> "$MG/calls"\nif [ -n "$LAUNCH_FAIL" ]; then echo "Unable to find image x:1 locally"; echo "pull access denied" >&2; exit 1; fi\n' > "$tmp/launch.sh"
+printf '#!/bin/sh\necho "$1" >> "$MG/alerts"\n' > "$tmp/alert.sh"; chmod +x "$tmp/alert.sh"; chmod +x "$tmp/bin/docker" "$tmp/launch.sh"
 fail=0
 # t <name> <load1> <running> <busy> <last_park_age_s|""> <expected stops> <expected launches>
 t(){ export MG=$(mktemp -d -p "$tmp"); : > "$MG/calls"; echo "$2 1 1 1/1 1" > "$MG/loadavg"; mkdir -p "$MG/st"
-  printf 'RUNNER_PREFIX=runner-\nPOOL_SIZE=10\nCAP=6\nLOAD_MAX=8\nHOLD_S=120\nLAUNCH_CMD=%s\nSTATE=%s/st\nLOADAVG=%s/loadavg\nMODE=enforce\nOTHER_JOB_PREFIX=%s\n' "$tmp/launch.sh" "$MG" "$MG" "${OPFX:-}" > "$MG/conf"
+  printf 'RUNNER_PREFIX=runner-\nPOOL_SIZE=10\nCAP=6\nLOAD_MAX=8\nHOLD_S=120\nLAUNCH_CMD=%s\nSTATE=%s/st\nLOADAVG=%s/loadavg\nMODE=enforce\nOTHER_JOB_PREFIX=%s\nFAIL_ALERT=3\nALERT_CMD=%s\n' "$tmp/launch.sh" "$MG" "$MG" "${OPFX:-}" "$tmp/alert.sh" > "$MG/conf"
   [ -n "$5" ] && echo $(( $(date +%s) - $5 )) > "$MG/st/last_park"
-  RUNNING="$3" BUSY="$4" OTHER="${OTHER:-}" MARI_GATE_CONF="$MG/conf" PATH="$tmp/bin:$PATH" bash "$here/mari-gate.sh" >/dev/null 2>&1
+  [ -n "${STREAK:-}" ] && echo "$STREAK" > "$MG/st/unpark_fail"
+  RUNNING="$3" BUSY="$4" OTHER="${OTHER:-}" LAUNCH_FAIL="${LAUNCH_FAIL:-}" MARI_GATE_CONF="$MG/conf" PATH="$tmp/bin:$PATH" bash "$here/mari-gate.sh" >/dev/null 2>&1
   stops=$(grep 'docker stop' "$MG/calls" | awk '{print $NF}' | sed 's/runner-//' | sort -n | tr '\n' ' ' | sed 's/ $//')
   launches=$(grep launch "$MG/calls" | awk '{print $2}' | sort -n | tr '\n' ' ' | sed 's/ $//')
   if [ "$stops" = "$6" ] && [ "$launches" = "$7" ]; then echo "PASS $1"; else echo "FAIL $1: stops=[$stops] want [$6], launches=[$launches] want [$7]"; fail=1; fi; }
@@ -40,4 +42,16 @@ OPFX="" OTHER="pp-a pp-b"
 t "prefix unset ignores others"         2.0 "1 2 3 4 5 6"          ""                  ""  ""               ""
 OPFX=pp- OTHER="xpp-a runner-pp"
 t "prefix must match the name start"    2.0 "1 2 3 4 5 6"          ""                  ""  ""               ""
+# A launcher that fails: the streak counts, the error is logged, ALERT_CMD fires at FAIL_ALERT (3 here).
+OPFX="" OTHER="" LAUNCH_FAIL=1
+fs(){ # fs <name> <start streak|""> <want streak> <want alerts>
+  STREAK="$2" t "$1 (launches)" 2.0 "1 2 3" "1" 300 "" "4 5 6" >/dev/null
+  got=$(cat "$MG/st/unpark_fail" 2>/dev/null || echo 0); al=$(grep -c . "$MG/alerts" 2>/dev/null || echo 0)
+  st=$(grep -o 'unpark_fail=[0-9]*' "$MG/st/status")
+  if [ "$got" = "$3" ] && [ "$al" = "$4" ]; then echo "PASS $1 (streak $got, alerts $al, $st)"; else echo "FAIL $1: streak $got want $3, alerts $al want $4"; fail=1; fi; }
+fs "failed unparks count up"             ""  3 1
+fs "streak continues, no repeat alert"   3   6 0
+fs "repeat alert at 12*FAIL_ALERT"       34  37 1
+LAUNCH_FAIL="" STREAK=5 t "a successful unpark resets the streak" 2.0 "1 2 3" "1" 300 "" "4 5 6"
+[ ! -e "$MG/st/unpark_fail" ] && echo "PASS streak file removed on success" || { echo "FAIL streak file still there"; fail=1; }
 exit $fail
