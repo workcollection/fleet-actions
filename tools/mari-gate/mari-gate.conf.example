@@ -8,3 +8,5 @@ LAUNCH_CMD=/usr/local/sbin/run-runners.sh   # called as: LAUNCH_CMD <index>
 MODE=observe                   # observe first; switch to enforce when the log looks right
 OTHER_JOB_PREFIX=              # optional: containers of another runner pool on this host (name prefix);
                                # each counts against CAP as one job, so CAP = jobs on the host
+FAIL_ALERT=10                  # consecutive failed unparks before ALERT_CMD runs (then every 12x that)
+ALERT_CMD=                     # optional: called with one message argument, e.g. a notify script

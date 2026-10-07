@@ -24,6 +24,9 @@ RUN curl -fsSL -o osslsigncode.tar.gz "https://github.com/mtrojnar/osslsigncode/
  && install -m 0755 build/osslsigncode /usr/local/bin/osslsigncode
 
 FROM ${BASE}
+# Local-only image (no registry has it): keep it out of `docker image prune -a`, which deletes it
+# whenever no container uses it, e.g. while a gate has parked every runner (2026-10-04: a pool was down 59 h).
+LABEL org.catboy.keep="true"
 ARG OSSLSIGNCODE_VERSION
 COPY --from=osslsigncode /usr/local/bin/osslsigncode /usr/local/bin/osslsigncode
 RUN command -v curl jq openssl osslsigncode \

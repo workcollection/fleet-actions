@@ -14,6 +14,10 @@
 # Accepted race: a job that GitHub assigns in the second between the idle check and the
 # stop fails and needs a rerun.
 # MODE=observe only logs what enforce would do.
+# A failed unpark logs the launcher's last output line and counts in $STATE/unpark_fail (reset by
+# any successful unpark; shown as unpark_fail= in the status line). At FAIL_ALERT consecutive failures,
+# and every 12*FAIL_ALERT after that, ALERT_CMD (optional) runs with one message argument: a launcher
+# that can never succeed (missing image, bad token) must not look like an intentionally parked pool.
 # OTHER_JOB_PREFIX (optional): running containers whose name starts with it are jobs of another
 # runner pool on the same host (one container = one job). They count against CAP, so CAP means
 # "jobs on this host": this pool gets CAP minus their number. The gate never stops them.
@@ -28,6 +32,8 @@ STATE=/var/lib/mari-gate
 LOADAVG=/proc/loadavg          # tests point this at a fixture
 MODE=enforce
 OTHER_JOB_PREFIX=
+FAIL_ALERT=10
+ALERT_CMD=
 CONF=${MARI_GATE_CONF:-/etc/mari-gate.conf}
 [ -f "$CONF" ] && . "$CONF"
 mkdir -p "$STATE/parked"
@@ -51,7 +57,17 @@ park(){
 unpark(){
   log "unpark $(name "$1") ($2) [$MODE]"
   [ "$MODE" = enforce ] || return 0
-  if bash "$LAUNCH_CMD" "$1" >/dev/null 2>&1; then rm -f "$STATE/parked/$1"; else log "unpark $(name "$1") FAILED"; fi
+  local out n
+  if out=$(bash "$LAUNCH_CMD" "$1" 2>&1); then
+    rm -f "$STATE/parked/$1" "$STATE/unpark_fail"
+  else
+    out=$(printf '%s\n' "$out" | grep -v '^[[:space:]]*$' | tail -1)
+    n=$(( $(cat "$STATE/unpark_fail" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$STATE/unpark_fail"
+    log "unpark $(name "$1") FAILED ($n in a row): ${out:-no output}"
+    if [ -n "$ALERT_CMD" ] && { [ "$n" -eq "$FAIL_ALERT" ] || [ $(( n % (FAIL_ALERT * 12) )) -eq 0 ]; }; then
+      $ALERT_CMD "mari-gate: $n unparks in a row failed; last: $(name "$1"): ${out:-no output}" >/dev/null 2>&1 || log "ALERT_CMD failed"
+    fi
+  fi
 }
 
 load=$(cut -d' ' -f1 "$LOADAVG")
@@ -64,7 +80,7 @@ for i in $(seq 1 "$POOL_SIZE"); do
   run+=("$i")
   if busy "$i"; then nbusy=$((nbusy+1)); else idle+=("$i"); fi
 done
-echo "$(date -u +%FT%TZ) load1=$load running=${#run[@]} busy=$nbusy idle=${#idle[@]} other=$nother cap=$CAP limit=$limit mode=$MODE" > "$STATE/status"
+echo "$(date -u +%FT%TZ) load1=$load running=${#run[@]} busy=$nbusy idle=${#idle[@]} other=$nother cap=$CAP limit=$limit unpark_fail=$(cat "$STATE/unpark_fail" 2>/dev/null || echo 0) mode=$MODE" > "$STATE/status"
 
 if [ "$high" = 1 ]; then
   for i in "${idle[@]}"; do park "$i" "load1 $load >= $LOAD_MAX"; done
