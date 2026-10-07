@@ -78,6 +78,11 @@ on:
         type: boolean
         required: false
         default: false
+      retention-days:
+        description: 'Days to keep the signed-files artifact (1-90). It is a handoff within one run (sign -> your publish job), so keep it short: every copy counts against the org storage quota.'
+        type: number
+        required: false
+        default: 3
     outputs:
       signed:
         description: 'true when every requested file was signed AND verified'
@@ -101,7 +106,7 @@ permissions:
   attestations: write
 
 env:
-  CATBOY_SIGN_VERSION: 2.1.7   # the User-Agent names it; bump with every release tag
+  CATBOY_SIGN_VERSION: 2.1.8   # the User-Agent names it; bump with every release tag
 
 jobs:
   sign:
@@ -475,7 +480,7 @@ jobs:
         with:
           name: ${{ inputs.artifact-name }}-signed
           path: dist
-          retention-days: 7
+          retention-days: ${{ inputs.retention-days }}
 
       - id: report
         name: Report (fail-open is not silent)
