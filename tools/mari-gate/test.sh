@@ -21,7 +21,8 @@ printf '#!/bin/sh\necho "$1" >> "$MG/alerts"\n' > "$tmp/alert.sh"; chmod +x "$tm
 fail=0
 # t <name> <load1> <running> <busy> <last_park_age_s|""> <expected stops> <expected launches>
 t(){ export MG=$(mktemp -d -p "$tmp"); : > "$MG/calls"; echo "$2 1 1 1/1 1" > "$MG/loadavg"; mkdir -p "$MG/st"
-  printf 'RUNNER_PREFIX=runner-\nPOOL_SIZE=10\nCAP=6\nLOAD_MAX=8\nHOLD_S=120\nLAUNCH_CMD=%s\nSTATE=%s/st\nLOADAVG=%s/loadavg\nMODE=enforce\nOTHER_JOB_PREFIX=%s\nFAIL_ALERT=3\nALERT_CMD=%s\n' "$tmp/launch.sh" "$MG" "$MG" "${OPFX:-}" "$tmp/alert.sh" > "$MG/conf"
+  printf 'RUNNER_PREFIX=runner-\nPOOL_SIZE=10\nCAP=6\nLOAD_MAX=8\nHOLD_S=120\nLAUNCH_CMD=%s\nSTATE=%s/st\nLOADAVG=%s/loadavg\nMODE=enforce\nOTHER_JOB_PREFIX=%s\nFAIL_ALERT=3\nALERT_CMD=%s\nHIGH_TICKS=%s\n' "$tmp/launch.sh" "$MG" "$MG" "${OPFX:-}" "$tmp/alert.sh" "${HT:-1}" > "$MG/conf"
+  [ -n "${HIGH:-}" ] && echo "$HIGH" > "$MG/st/high_ticks"
   [ -n "$5" ] && echo $(( $(date +%s) - $5 )) > "$MG/st/last_park"
   [ -n "${STREAK:-}" ] && echo "$STREAK" > "$MG/st/unpark_fail"
   RUNNING="$3" BUSY="$4" OTHER="${OTHER:-}" LAUNCH_FAIL="${LAUNCH_FAIL:-}" LATE="${LATE:-}" ASSIGNED="${ASSIGNED:-}" DONE="${DONE:-}" MARI_GATE_CONF="$MG/conf" PATH="$tmp/bin:$PATH" bash "$here/mari-gate.sh" >/dev/null 2>&1
@@ -46,6 +47,14 @@ OPFX="" OTHER="pp-a pp-b"
 t "prefix unset ignores others"         2.0 "1 2 3 4 5 6"          ""                  ""  ""               ""
 OPFX=pp- OTHER="xpp-a runner-pp"
 t "prefix must match the name start"    2.0 "1 2 3 4 5 6"          ""                  ""  ""               ""
+# HIGH_TICKS=2: one high tick waits (no park, no unpark); the second parks; a low tick resets.
+HT=2
+t "1st high tick waits"                   9.5 "1 2 3"                ""                  300 ""               ""
+HIGH=1 t "2nd high tick parks idle"       9.5 "1 2 3"                "1"                 ""  "2 3"            ""
+HIGH=""
+HIGH=1 t "a low tick resets, unparks"     2.0 "1 2 3"                ""                  300 ""               "4 5 6"
+[ ! -e "$MG/st/high_ticks" ] && echo "PASS low tick removed high_ticks" || { echo "FAIL high_ticks not reset"; fail=1; }
+HT="" HIGH=""
 # The park race: a runner that takes a job after the idle check is not stopped.
 LATE="5 6"
 t "re-check spares a runner that took a job" 9.5 "1 2 3 4 5 6"        ""                  ""  "1 2 3 4"        ""

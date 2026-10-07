@@ -4,7 +4,7 @@ Use this when a fixed pool of self-hosted runner containers shares a host with w
 
 | Condition | Action |
 |---|---|
-| host 1-minute load ≥ `LOAD_MAX` (8) | park every **idle** runner; busy runners finish their job |
+| host 1-minute load ≥ `LOAD_MAX` (8) on `HIGH_TICKS` (1) ticks in a row | park every **idle** runner; busy runners finish their job. A shorter spike only waits |
 | more than `CAP` (6) runners online | park idle runners, highest index first |
 | fewer than `CAP` online, and `HOLD_S` (120 s) since the last park | unpark runners, lowest index first, with your launcher |
 
