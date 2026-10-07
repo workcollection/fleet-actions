@@ -49,6 +49,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { fetch-depth: 0 }
       - name: Install + run gitleaks
+        id: scan
         continue-on-error: true
         run: |
           echo '## 🔑 gitleaks (secrets)' >> "$GITHUB_STEP_SUMMARY"
@@ -66,11 +67,14 @@ jobs:
           else
             n=$(python3 -c "import json;print(len(json.load(open('/tmp/gitleaks.json'))))" 2>/dev/null || echo '?')
             echo "⚠️ **$n potential secret(s)** — see the gitleaks artifact" >> "$GITHUB_STEP_SUMMARY"
+            echo report=1 >> "$GITHUB_OUTPUT"
           fi
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         continue-on-error: true   # artifact quota must not fail the job
-        if: always()
-        with: { name: gitleaks-report, path: /tmp/gitleaks.json, if-no-files-found: ignore, retention-days: 7 }
+        # Only when there is something to read (findings, a tool error, or a crashed step): a clean
+        # report is empty, and every artifact counts against the org's Actions storage quota.
+        if: always() && (steps.scan.outputs.report == '1' || steps.scan.outcome == 'failure')
+        with: { name: gitleaks-report, path: /tmp/gitleaks.json, if-no-files-found: ignore, retention-days: 3 }
 
   deps:
     name: Dependency CVEs (OSV-Scanner)
@@ -78,6 +82,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install + run OSV-Scanner
+        id: scan
         continue-on-error: true
         run: |
           echo '## 📦 OSV-Scanner (dependency CVEs)' >> "$GITHUB_STEP_SUMMARY"
@@ -97,7 +102,8 @@ jobs:
           /tmp/osv scan source --recursive --format table --output /tmp/osv.txt . 2>/tmp/osv.log || rc=$?
           case "$rc" in
             0)   echo '✅ no known dependency vulnerabilities' >> "$GITHUB_STEP_SUMMARY" ;;
-            1)   {
+            1)   echo report=1 >> "$GITHUB_OUTPUT"
+                 {
                    echo '<details><summary>vulnerable dependencies</summary>'
                    echo ''
                    echo '```'
@@ -106,12 +112,15 @@ jobs:
                    echo '</details>'
                  } >> "$GITHUB_STEP_SUMMARY" ;;
             128) echo '_no dependency manifests or lockfiles found - nothing to scan_' >> "$GITHUB_STEP_SUMMARY" ;;
-            *)   echo "_osv-scanner failed (exit ${rc}) - see the artifact_" >> "$GITHUB_STEP_SUMMARY" ;;
+            *)   echo report=1 >> "$GITHUB_OUTPUT"
+                 echo "_osv-scanner failed (exit ${rc}) - see the artifact_" >> "$GITHUB_STEP_SUMMARY" ;;
           esac
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         continue-on-error: true   # artifact quota must not fail the job
-        if: always()
-        with: { name: osv-report, path: /tmp/osv.txt, if-no-files-found: ignore, retention-days: 7 }
+        # Only when there is something to read (findings, a tool error, or a crashed step): a clean
+        # report is empty, and every artifact counts against the org's Actions storage quota.
+        if: always() && (steps.scan.outputs.report == '1' || steps.scan.outcome == 'failure')
+        with: { name: osv-report, path: /tmp/osv.txt, if-no-files-found: ignore, retention-days: 3 }
 
   sast:
     name: SAST (Semgrep)
@@ -120,19 +129,21 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: workcollection/fleet-actions/.github/actions/setup-python@4eec42969c64740823618a9b47b8e29e16efa690 # self-ref: main after #6, composites unchanged by the release commit
       - name: Install + run Semgrep
+        id: scan
         continue-on-error: true
         run: |
           echo '## 🔎 Semgrep (SAST)' >> "$GITHUB_STEP_SUMMARY"
           python3 -m pip install --quiet --disable-pip-version-check 'semgrep==1.177.0' || { echo '_semgrep install failed_' >> "$GITHUB_STEP_SUMMARY"; exit 0; }
           semgrep scan --config=auto --quiet --json --output=/tmp/semgrep.json . 2>/tmp/sg.log || true
           python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY" || echo '_semgrep parse failed_' >> "$GITHUB_STEP_SUMMARY"
-          import json, collections
+          import json, collections, os
           try: r = json.load(open('/tmp/semgrep.json')).get('results', [])
           except Exception: r = []
           sev = collections.Counter(x.get('extra', {}).get('severity', 'INFO') for x in r)
           if not r:
               print('✅ no SAST findings')
           else:
+              with open(os.environ['GITHUB_OUTPUT'], 'a') as o: o.write('report=1\n')
               print(f"⚠️ **{len(r)} finding(s)** — " + ", ".join(f"{k}:{v}" for k, v in sev.most_common()))
               print('<details><summary>top findings</summary>\n\n```')
               for x in r[:40]:
@@ -141,8 +152,10 @@ jobs:
           PY
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         continue-on-error: true   # artifact quota must not fail the job
-        if: always()
-        with: { name: semgrep-report, path: /tmp/semgrep.json, if-no-files-found: ignore, retention-days: 7 }
+        # Only when there is something to read (findings, a tool error, or a crashed step): a clean
+        # report is empty, and every artifact counts against the org's Actions storage quota.
+        if: always() && (steps.scan.outputs.report == '1' || steps.scan.outcome == 'failure')
+        with: { name: semgrep-report, path: /tmp/semgrep.json, if-no-files-found: ignore, retention-days: 3 }
 
   go-security:
     name: Go security (govulncheck + gosec)
