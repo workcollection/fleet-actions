@@ -8,7 +8,11 @@ cat > "$tmp/bin/docker" <<'STUB'
 #!/bin/bash
 case "$1" in
   ps)  for i in $RUNNING; do echo "runner-$i"; done; for o in ${OTHER:-}; do echo "$o"; done ;;
-  top) i=${2#runner-}; echo "PID COMMAND"; for b in $BUSY; do [ "$b" = "$i" ] && echo "1 Runner.Worker"; done ;;
+  top) i=${2#runner-}; echo "PID COMMAND"; for b in $BUSY; do [ "$b" = "$i" ] && echo "1 Runner.Worker"; done
+       # LATE: idle at the first look, busy (a worker) from the second look on
+       for b in ${LATE:-}; do [ "$b" = "$i" ] || continue; n=$(cat "$MG/top.$i" 2>/dev/null || echo 0); echo $((n+1)) > "$MG/top.$i"; [ "$n" -ge 1 ] && echo "1 Runner.Worker"; done ;;
+  logs) i=${4#runner-}; for b in ${ASSIGNED:-}; do [ "$b" = "$i" ] && echo "2026-10-07 06:35:47Z: Running job: security / Go security"; done
+        for b in ${DONE:-}; do [ "$b" = "$i" ] && { echo "2026-10-07 06:35:47Z: Running job: x"; echo "2026-10-07 06:36:10Z: Job x completed with result: Succeeded"; }; done ;;
   stop|rm) echo "docker $*" >> "$MG/calls" ;;
 esac
 STUB
@@ -20,7 +24,7 @@ t(){ export MG=$(mktemp -d -p "$tmp"); : > "$MG/calls"; echo "$2 1 1 1/1 1" > "$
   printf 'RUNNER_PREFIX=runner-\nPOOL_SIZE=10\nCAP=6\nLOAD_MAX=8\nHOLD_S=120\nLAUNCH_CMD=%s\nSTATE=%s/st\nLOADAVG=%s/loadavg\nMODE=enforce\nOTHER_JOB_PREFIX=%s\nFAIL_ALERT=3\nALERT_CMD=%s\n' "$tmp/launch.sh" "$MG" "$MG" "${OPFX:-}" "$tmp/alert.sh" > "$MG/conf"
   [ -n "$5" ] && echo $(( $(date +%s) - $5 )) > "$MG/st/last_park"
   [ -n "${STREAK:-}" ] && echo "$STREAK" > "$MG/st/unpark_fail"
-  RUNNING="$3" BUSY="$4" OTHER="${OTHER:-}" LAUNCH_FAIL="${LAUNCH_FAIL:-}" MARI_GATE_CONF="$MG/conf" PATH="$tmp/bin:$PATH" bash "$here/mari-gate.sh" >/dev/null 2>&1
+  RUNNING="$3" BUSY="$4" OTHER="${OTHER:-}" LAUNCH_FAIL="${LAUNCH_FAIL:-}" LATE="${LATE:-}" ASSIGNED="${ASSIGNED:-}" DONE="${DONE:-}" MARI_GATE_CONF="$MG/conf" PATH="$tmp/bin:$PATH" bash "$here/mari-gate.sh" >/dev/null 2>&1
   stops=$(grep 'docker stop' "$MG/calls" | awk '{print $NF}' | sed 's/runner-//' | sort -n | tr '\n' ' ' | sed 's/ $//')
   launches=$(grep launch "$MG/calls" | awk '{print $2}' | sort -n | tr '\n' ' ' | sed 's/ $//')
   if [ "$stops" = "$6" ] && [ "$launches" = "$7" ]; then echo "PASS $1"; else echo "FAIL $1: stops=[$stops] want [$6], launches=[$launches] want [$7]"; fail=1; fi; }
@@ -42,6 +46,14 @@ OPFX="" OTHER="pp-a pp-b"
 t "prefix unset ignores others"         2.0 "1 2 3 4 5 6"          ""                  ""  ""               ""
 OPFX=pp- OTHER="xpp-a runner-pp"
 t "prefix must match the name start"    2.0 "1 2 3 4 5 6"          ""                  ""  ""               ""
+# The park race: a runner that takes a job after the idle check is not stopped.
+LATE="5 6"
+t "re-check spares a runner that took a job" 9.5 "1 2 3 4 5 6"        ""                  ""  "1 2 3 4"        ""
+LATE="" ASSIGNED="3"
+t "'Running job:' without completion = busy" 9.5 "1 2 3 4"             ""                  ""  "1 2 4"          ""
+ASSIGNED="" DONE="2"
+t "completed job = idle again"            9.5 "1 2 3"                ""                  ""  "1 2 3"          ""
+DONE=""
 # A launcher that fails: the streak counts, the error is logged, ALERT_CMD fires at FAIL_ALERT (3 here).
 OPFX="" OTHER="" LAUNCH_FAIL=1
 fs(){ # fs <name> <start streak|""> <want streak> <want alerts>
