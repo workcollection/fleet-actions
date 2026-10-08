@@ -8,6 +8,14 @@ Use this when a fixed pool of self-hosted runner containers shares a host with w
 | more than `CAP` (6) runners online | park idle runners, highest index first |
 | fewer than `CAP` online, and `HOLD_S` (120 s) since the last park | unpark runners, lowest index first, with your launcher |
 
+**High load without killing jobs:** with `LOAD_PARK=0` high load only holds (no park, no unpark):
+parking an online idle runner can kill a job GitHub assigns during the graceful stop, and that
+assignment can come at any moment. The emergency valve still parks idle runners in a real overload:
+load1 ≥ `EMERGENCY_LOAD` for `EMERGENCY_TICKS` ticks **and** CPU pressure (`PSI_FILE`, "some avg10")
+≥ `EMERGENCY_PSI` %. Each one is logged as `EMERGENCY` at warning level and counted in
+`/var/lib/mari-gate/emergency_parks`. Inside a container, `/proc/pressure/cpu` is the container's own
+cgroup: feed the host's pressure into a file and point `PSI_FILE` at it.
+
 **A launcher that cannot succeed** (deleted local image, expired token) must not look like an
 intentionally parked pool. A failed unpark logs the launcher's last output line and counts in
 `/var/lib/mari-gate/unpark_fail`; any successful unpark resets it. The status line shows it as `unpark_fail=`.

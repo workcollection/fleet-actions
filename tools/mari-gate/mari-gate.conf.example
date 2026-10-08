@@ -11,3 +11,9 @@ OTHER_JOB_PREFIX=              # optional: containers of another runner pool on 
                                # each counts against CAP as one job, so CAP = jobs on the host
 FAIL_ALERT=10                  # consecutive failed unparks before ALERT_CMD runs (then every 12x that)
 ALERT_CMD=                     # optional: called with one message argument, e.g. a notify script
+LOAD_PARK=1                    # 0 = high load only holds (no park, no unpark): parking an online runner can kill a job
+EMERGENCY_LOAD=0               # with LOAD_PARK=0: park anyway when load1 >= this (0 = never) ...
+EMERGENCY_TICKS=10             # ... for this many ticks in a row ...
+EMERGENCY_PSI=30               # ... and CPU pressure 'some avg10' >= this % (other tenants are starving)
+PSI_FILE=/proc/pressure/cpu    # inside a container point this at the HOST's pressure (a container sees its own)
+PSI_MAX_AGE=120                # a PSI_FILE older than this counts as unknown: no emergency park
