@@ -16,7 +16,11 @@
 # Race: a job that GitHub assigns between the idle check and the stop fails with no step run
 # (10 min later, 'lost communication'). park() therefore re-checks right before each stop, and a
 # runner counts as busy as soon as it logged 'Running job:' (before Runner.Worker exists). What
-# remains is the sub-second gap between that re-check and the SIGTERM.
+# remains is the gap between that re-check and the end of the graceful stop. Under a job backlog a
+# runner that finishes a job gets the next one within 1-2 s, and the listener keeps accepting while
+# the stop deregisters it (several seconds): MIN_IDLE_S > 0 parks only a runner that has been idle
+# that long (since its last 'completed with result' / 'Listening for Jobs'), i.e. one GitHub is not
+# about to hand a job.
 # MODE=observe only logs what enforce would do.
 # A failed unpark logs the launcher's last output line and counts in $STATE/unpark_fail (reset by
 # any successful unpark; shown as unpark_fail= in the status line). At FAIL_ALERT consecutive failures,
@@ -38,6 +42,7 @@ MODE=enforce
 OTHER_JOB_PREFIX=
 FAIL_ALERT=10
 HIGH_TICKS=1
+MIN_IDLE_S=0
 ALERT_CMD=
 CONF=${MARI_GATE_CONF:-/etc/mari-gate.conf}
 [ -f "$CONF" ] && . "$CONF"
@@ -57,9 +62,18 @@ busy(){ local out; out=$(docker top "$(name "$1")" -eo pid,comm 2>/dev/null); [[
   [[ $out == *"Running job:"* ]]; }
 others(){ [ -n "$OTHER_JOB_PREFIX" ] || { echo 0; return; }
   local out; out=$(docker ps --format '{{.Names}}'); awk -v p="$OTHER_JOB_PREFIX" 'index($0, p) == 1 { n++ } END { print n + 0 }' <<<"$out"; }
+# Seconds since the runner last became idle (its newest 'completed with result' or 'Listening for
+# Jobs' line, by the runner's own timestamp); a large number when there is no such line.
+idle_s(){ local out t; out=$(docker logs --tail 40 "$(name "$1")" 2>&1)
+  t=$(grep -E 'completed with result|Listening for Jobs' <<<"$out" | tail -1 | grep -oE '^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9:]{8}Z')
+  [ -n "$t" ] && t=$(date -u -d "$t" +%s 2>/dev/null); [ -n "$t" ] || { echo 99999; return; }
+  echo $(( $(date +%s) - t )); }
 park(){
   # The idle list is built once per tick and each stop takes seconds: look again right before this one.
   if busy "$1"; then log "skip park $(name "$1"): took a job since the idle check"; return 0; fi
+  if [ "$MIN_IDLE_S" -gt 0 ]; then local s; s=$(idle_s "$1")
+    if [ "$s" -lt "$MIN_IDLE_S" ]; then log "skip park $(name "$1"): idle only ${s}s (< MIN_IDLE_S $MIN_IDLE_S), a job may be on its way"; return 0; fi
+  fi
   log "park $(name "$1") ($2) [$MODE]"
   [ "$MODE" = enforce ] || return 0
   touch "$STATE/parked/$1"; date +%s > "$STATE/last_park"
