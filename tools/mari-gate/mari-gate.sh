@@ -7,6 +7,9 @@
 #   - host load1 >= LOAD_MAX on HIGH_TICKS consecutive ticks: park every IDLE runner. Busy runners
 #     finish their job. A shorter spike only waits (no park, no unpark): parking is the one action
 #     that can kill a job being assigned, so it should not react to a single sample.
+#     LOAD_PARK=0: high load only HOLDS (no park, no unpark). Parking an ONLINE runner can kill a job
+#     that GitHub assigns during the graceful stop, and GitHub's assignment lag makes that impossible
+#     to rule out (measured: every zero-step job loss coincided with a load park).
 #   - otherwise: park idle runners above CAP, and unpark parked runners up to CAP, but only
 #     HOLD_S after the last park, so a load spike does not flap runners on and off.
 # Park   = mark parked, `docker stop -t 30` (the runner entrypoint deregisters on SIGTERM), rm.
@@ -43,6 +46,7 @@ OTHER_JOB_PREFIX=
 FAIL_ALERT=10
 HIGH_TICKS=1
 MIN_IDLE_S=0
+LOAD_PARK=1
 ALERT_CMD=
 CONF=${MARI_GATE_CONF:-/etc/mari-gate.conf}
 [ -f "$CONF" ] && . "$CONF"
@@ -110,6 +114,10 @@ echo "$(date -u +%FT%TZ) load1=$load running=${#run[@]} busy=$nbusy idle=${#idle
 if [ "$high" = 1 ]; then
   ht=$(( $(cat "$STATE/high_ticks" 2>/dev/null || echo 0) + 1 )); echo "$ht" > "$STATE/high_ticks"
   if [ "$ht" -lt "$HIGH_TICKS" ]; then log "load1 $load >= $LOAD_MAX (tick $ht/$HIGH_TICKS): waiting, no park, no unpark"; exit 0; fi
+  if [ "$LOAD_PARK" = 0 ]; then
+    [ "$ht" -eq "$HIGH_TICKS" ] && log "load1 $load >= $LOAD_MAX: holding (LOAD_PARK=0: no park, no unpark)"
+    exit 0
+  fi
   for i in "${idle[@]}"; do park "$i" "load1 $load >= $LOAD_MAX, $ht ticks"; done
   exit 0
 fi
