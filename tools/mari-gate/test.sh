@@ -23,7 +23,7 @@ printf '#!/bin/sh\necho "$1" >> "$MG/alerts"\n' > "$tmp/alert.sh"; chmod +x "$tm
 fail=0
 # t <name> <load1> <running> <busy> <last_park_age_s|""> <expected stops> <expected launches>
 t(){ export MG=$(mktemp -d -p "$tmp"); : > "$MG/calls"; echo "$2 1 1 1/1 1" > "$MG/loadavg"; mkdir -p "$MG/st"
-  printf 'RUNNER_PREFIX=runner-\nPOOL_SIZE=10\nCAP=6\nLOAD_MAX=8\nHOLD_S=120\nLAUNCH_CMD=%s\nSTATE=%s/st\nLOADAVG=%s/loadavg\nMODE=enforce\nOTHER_JOB_PREFIX=%s\nFAIL_ALERT=3\nALERT_CMD=%s\nHIGH_TICKS=%s\nMIN_IDLE_S=%s\n' "$tmp/launch.sh" "$MG" "$MG" "${OPFX:-}" "$tmp/alert.sh" "${HT:-1}" "${MINIDLE:-0}" > "$MG/conf"
+  printf 'RUNNER_PREFIX=runner-\nPOOL_SIZE=10\nCAP=6\nLOAD_MAX=8\nHOLD_S=120\nLAUNCH_CMD=%s\nSTATE=%s/st\nLOADAVG=%s/loadavg\nMODE=enforce\nOTHER_JOB_PREFIX=%s\nFAIL_ALERT=3\nALERT_CMD=%s\nHIGH_TICKS=%s\nMIN_IDLE_S=%s\nLOAD_PARK=%s\n' "$tmp/launch.sh" "$MG" "$MG" "${OPFX:-}" "$tmp/alert.sh" "${HT:-1}" "${MINIDLE:-0}" "${LP:-1}" > "$MG/conf"
   [ -n "${HIGH:-}" ] && echo "$HIGH" > "$MG/st/high_ticks"
   [ -n "$5" ] && echo $(( $(date +%s) - $5 )) > "$MG/st/last_park"
   [ -n "${STREAK:-}" ] && echo "$STREAK" > "$MG/st/unpark_fail"
@@ -57,6 +57,12 @@ HIGH=""
 HIGH=1 t "a low tick resets, unparks"     2.0 "1 2 3"                ""                  300 ""               "4 5 6"
 [ ! -e "$MG/st/high_ticks" ] && echo "PASS low tick removed high_ticks" || { echo "FAIL high_ticks not reset"; fail=1; }
 HT="" HIGH=""
+# LOAD_PARK=0: high load holds; nothing is parked or unparked. Low load still unparks.
+LP=0
+t "LOAD_PARK=0: high load parks nothing"  9.5 "1 2 3"                ""                  ""  ""               ""
+t "LOAD_PARK=0: high load, no unpark"      9.5 "1 2"                  ""                  300 ""               ""
+t "LOAD_PARK=0: low load still unparks"    2.0 "1 2"                  ""                  300 ""               "3 4 5 6"
+LP=""
 # The park race: a runner that takes a job after the idle check is not stopped.
 LATE="5 6"
 t "re-check spares a runner that took a job" 9.5 "1 2 3 4 5 6"        ""                  ""  "1 2 3 4"        ""
