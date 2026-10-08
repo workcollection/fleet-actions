@@ -10,6 +10,10 @@
 #     LOAD_PARK=0: high load only HOLDS (no park, no unpark). Parking an ONLINE runner can kill a job
 #     that GitHub assigns during the graceful stop, and GitHub's assignment lag makes that impossible
 #     to rule out (measured: every zero-step job loss coincided with a load park).
+#     Emergency valve (EMERGENCY_LOAD > 0): with LOAD_PARK=0, idle runners ARE parked when load1 >=
+#     EMERGENCY_LOAD on EMERGENCY_TICKS consecutive ticks AND CPU pressure 'some avg10' (PSI_FILE, at
+#     most PSI_MAX_AGE s old) >= EMERGENCY_PSI %. A real overload that starves other tenants outweighs
+#     the small risk to a job. Logged as 'EMERGENCY' and counted in $STATE/emergency_parks.
 #   - otherwise: park idle runners above CAP, and unpark parked runners up to CAP, but only
 #     HOLD_S after the last park, so a load spike does not flap runners on and off.
 # Park   = mark parked, `docker stop -t 30` (the runner entrypoint deregisters on SIGTERM), rm.
@@ -47,6 +51,11 @@ FAIL_ALERT=10
 HIGH_TICKS=1
 MIN_IDLE_S=0
 LOAD_PARK=1
+EMERGENCY_LOAD=0
+EMERGENCY_TICKS=10
+EMERGENCY_PSI=30
+PSI_FILE=/proc/pressure/cpu
+PSI_MAX_AGE=120
 ALERT_CMD=
 CONF=${MARI_GATE_CONF:-/etc/mari-gate.conf}
 [ -f "$CONF" ] && . "$CONF"
@@ -74,9 +83,9 @@ idle_s(){ local out t; out=$(docker logs --tail 40 "$(name "$1")" 2>&1)
   echo $(( $(date +%s) - t )); }
 park(){
   # The idle list is built once per tick and each stop takes seconds: look again right before this one.
-  if busy "$1"; then log "skip park $(name "$1"): took a job since the idle check"; return 0; fi
+  if busy "$1"; then log "skip park $(name "$1"): took a job since the idle check"; return 1; fi
   if [ "$MIN_IDLE_S" -gt 0 ]; then local s; s=$(idle_s "$1")
-    if [ "$s" -lt "$MIN_IDLE_S" ]; then log "skip park $(name "$1"): idle only ${s}s (< MIN_IDLE_S $MIN_IDLE_S), a job may be on its way"; return 0; fi
+    if [ "$s" -lt "$MIN_IDLE_S" ]; then log "skip park $(name "$1"): idle only ${s}s (< MIN_IDLE_S $MIN_IDLE_S), a job may be on its way"; return 1; fi
   fi
   log "park $(name "$1") ($2) [$MODE]"
   [ "$MODE" = enforce ] || return 0
@@ -115,13 +124,31 @@ if [ "$high" = 1 ]; then
   ht=$(( $(cat "$STATE/high_ticks" 2>/dev/null || echo 0) + 1 )); echo "$ht" > "$STATE/high_ticks"
   if [ "$ht" -lt "$HIGH_TICKS" ]; then log "load1 $load >= $LOAD_MAX (tick $ht/$HIGH_TICKS): waiting, no park, no unpark"; exit 0; fi
   if [ "$LOAD_PARK" = 0 ]; then
+    et=0; [ "$EMERGENCY_LOAD" != 0 ] && awk -v l="$load" -v m="$EMERGENCY_LOAD" 'BEGIN{exit !(l >= m)}' \
+      && et=$(( $(cat "$STATE/emergency_ticks" 2>/dev/null || echo 0) + 1 ))
+    echo "$et" > "$STATE/emergency_ticks"
+    if [ "$et" -ge "$EMERGENCY_TICKS" ]; then
+      psi=""
+      if [ -r "$PSI_FILE" ] && [ $(( $(date +%s) - $(stat -c %Y "$PSI_FILE") )) -le "$PSI_MAX_AGE" ]; then
+        psi=$(sed -n 's/^some avg10=\([0-9.]*\).*/\1/p' "$PSI_FILE")
+      fi
+      if [ -z "$psi" ]; then
+        log "EMERGENCY check: load1 $load >= $EMERGENCY_LOAD for $et ticks, but no fresh CPU pressure in $PSI_FILE: holding"
+      elif awk -v p="$psi" -v m="$EMERGENCY_PSI" 'BEGIN{exit !(p >= m)}'; then
+        logger -p user.warning -t mari-gate "EMERGENCY: load1 $load >= $EMERGENCY_LOAD for $et ticks and CPU pressure $psi% >= $EMERGENCY_PSI%: parking idle runners"
+        [ -n "${INVOCATION_ID:-}" ] || echo "mari-gate: EMERGENCY: load1 $load, $et ticks, CPU pressure $psi%: parking idle runners"
+        for i in "${idle[@]}"; do park "$i" "EMERGENCY load1 $load, CPU pressure $psi%" \
+          && echo $(( $(cat "$STATE/emergency_parks" 2>/dev/null || echo 0) + 1 )) > "$STATE/emergency_parks"; done
+        exit 0
+      fi
+    fi
     [ "$ht" -eq "$HIGH_TICKS" ] && log "load1 $load >= $LOAD_MAX: holding (LOAD_PARK=0: no park, no unpark)"
     exit 0
   fi
   for i in "${idle[@]}"; do park "$i" "load1 $load >= $LOAD_MAX, $ht ticks"; done
   exit 0
 fi
-rm -f "$STATE/high_ticks"
+rm -f "$STATE/high_ticks" "$STATE/emergency_ticks"
 # Over the limit (CAP minus other jobs): park idle runners, highest index first.
 over=$(( ${#run[@]} - limit ))
 if [ "$over" -gt 0 ]; then
