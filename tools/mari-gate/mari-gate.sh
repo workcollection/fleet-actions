@@ -95,11 +95,17 @@ park(){
 unpark(){
   log "unpark $(name "$1") ($2) [$MODE]"
   [ "$MODE" = enforce ] || return 0
-  local out n
+  local out n raw
   if out=$(bash "$LAUNCH_CMD" "$1" 2>&1); then
     rm -f "$STATE/parked/$1" "$STATE/unpark_fail"
   else
-    out=$(printf '%s\n' "$out" | grep -v '^[[:space:]]*$' | tail -1)
+    raw=$out
+    # The line that names the error ('docker: Error response …: Conflict …'), not docker's trailing
+    # "Run 'docker run --help' for more information"; else the last non-empty line.
+    out=$(printf '%s\n' "$out" | grep -v '^[[:space:]]*$' | grep -v -- "--help' for more information" \
+      | { grep -i -m1 -E 'error|denied|conflict|failed|not found|no such' || true; } | head -1) \
+      || true
+    [ -n "$out" ] || out=$(printf '%s\n' "$raw" | grep -v '^[[:space:]]*$' | tail -1)
     n=$(( $(cat "$STATE/unpark_fail" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$STATE/unpark_fail"
     log "unpark $(name "$1") FAILED ($n in a row): ${out:-no output}"
     if [ -n "$ALERT_CMD" ] && { [ "$n" -eq "$FAIL_ALERT" ] || [ $(( n % (FAIL_ALERT * 12) )) -eq 0 ]; }; then
