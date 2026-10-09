@@ -18,7 +18,7 @@ case "$1" in
   stop|rm) echo "docker $*" >> "$MG/calls" ;;
 esac
 STUB
-printf '#!/bin/sh\necho "launch $1" >> "$MG/calls"\nif [ -n "$LAUNCH_FAIL" ]; then echo "Unable to find image x:1 locally"; echo "pull access denied" >&2; exit 1; fi\n' > "$tmp/launch.sh"
+printf '#!/bin/sh\necho "launch $1" >> "$MG/calls"\nif [ -n "$LAUNCH_FAIL" ]; then echo "docker: Error response from daemon: Conflict. The container name is already in use" >&2; echo "Run '"'"'docker run --help'"'"' for more information" >&2; exit 125; fi\n' > "$tmp/launch.sh"
 printf '#!/bin/sh\necho "$1" >> "$MG/alerts"\n' > "$tmp/alert.sh"; chmod +x "$tmp/alert.sh"; chmod +x "$tmp/bin/docker" "$tmp/launch.sh"
 fail=0
 # t <name> <load1> <running> <busy> <last_park_age_s|""> <expected stops> <expected launches>
