@@ -101,7 +101,12 @@ runs:
         username: ${{ github.actor }}
         password: ${{ github.token }}
 
+    # build-push-action uploads a *.dockerbuild record artifact per build. Keep it to the
+    # fleet artifact classes (m-4785): tag 30 d, PR 3 d, other refs 7 d. web-core alone held
+    # 522 of these against an org storage budget of 0.5 GB.
     - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+      env:
+        DOCKER_BUILD_RECORD_RETENTION_DAYS: ${{ startsWith(github.ref, 'refs/tags/') && 30 || (github.event_name == 'pull_request' && 3 || 7) }}
       with:
         context: ${{ inputs.context }}
         file: ${{ inputs.file }}
