@@ -30,6 +30,33 @@ its container name prefix. Each such running container counts as one job against
 means "jobs on this host" and this pool gets `CAP` minus their number (never below 0). The gate
 only counts those containers; it never stops them. Unset (the default) keeps the old behaviour.
 
+**Throttle ladder: slow CI down before stopping it** (`LADDER=observe|enforce`, default `0` = off).
+It is keyed on the CPU pressure of the tenants that matter, not on host pressure. Measured on the host it
+was built for: a clamp on CI raises host pressure by itself (CI threads waiting count in it), so a ladder
+on host pressure climbs to its top level and stays there. The host writes the input with `wing-psi.sh`:
+
+```sh
+# on the host, every 15 s (a timer), for the containers CI must not hurt:
+wing-psi.sh 110 114 115 116 > /tmp/w && pct push 113 /tmp/w /run/mari-gate/wing-cpu-pressure
+```
+
+| Level | Entered at (`LADDER_PSI_FILE` "some avg10") | Action |
+|---|---|---|
+| L1 | ≥ `LADDER_T1` (10) % for `LADDER_N1` (3) ticks | hold: no unpark. Running jobs continue |
+| L2 | ≥ `LADDER_T2` (15) % for `LADDER_N2` (5) ticks | `LADDER_CGROUP/cpu.max` = `LADDER_CPU2` (4 CPUs) |
+| L3 | ≥ `LADDER_T3` (25) % for `LADDER_N3` (10) ticks | `cpu.max` = `LADDER_CPU3` (2 CPUs); after `LADDER_PARK_AFTER_S` (900 s), park one **idle** runner per tick |
+
+- **One level per tick, both ways.** It steps down after `LADDER_CALM` (5) ticks below the current level's threshold.
+- **The clamp goes on the cgroup that holds dockerd and every container** (inside an LXC container: its own `/sys/fs/cgroup/system.slice`, writable from inside). So BuildKit steps and containers a job starts are covered. A per-runner `--cpus` limit does not cover those.
+- **Floor of 2 CPUs.** A configured value below it is raised. Measured at 2 CPUs with a CPU burner saturating the clamp for 10 min: `docker ps`/`docker exec` latency unchanged (~300 ms), and no listener errors in any runner log.
+- **Exact restore.** `cpu.max` is saved when L2 is entered and written back exactly when the ladder drops below L2.
+- **Self-healing.** Every tick at L2/L3 re-writes the level's value, because a reboot resets the cgroup.
+- **Stale or missing input never escalates.** The level holds, and after `LADDER_STALE_RESTORE_S` (600 s) the ladder goes back to L0.
+- **Turning it off.** `LADDER=0` with a saved value restores it on the next tick (rollback = one config line). `mari-gate --restore` restores and resets now; run it before stopping the timer.
+- **observe** tracks and logs levels and changes nothing.
+- **Status and journal.** The status line shows `ladder=L<n>/<mode> wing_psi=<value|stale|off>`. Every level change and every write goes to the journal.
+- **Emergency valve.** With the ladder on, set `EMERGENCY_LOAD=0`: L3 replaces it.
+
 - **Park** marks the index in `/var/lib/mari-gate/parked/`, runs `docker stop -t 30` (the runner entrypoint deregisters on SIGTERM) and removes the container.
 - **Unpark** runs `LAUNCH_CMD <index>`, which re-registers the runner, then removes the mark.
 - `/var/lib/mari-gate/status` holds the last decision's numbers. The journal (`journalctl -t mari-gate`) holds every park and unpark.

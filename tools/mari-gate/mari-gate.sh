@@ -36,6 +36,22 @@
 # OTHER_JOB_PREFIX (optional): running containers whose name starts with it are jobs of another
 # runner pool on the same host (one container = one job). They count against CAP, so CAP means
 # "jobs on this host": this pool gets CAP minus their number. The gate never stops them.
+#
+# Throttle ladder (LADDER=observe|enforce; 0 = off): slow CI down before stopping anything, keyed on
+# the CPU pressure of the tenants CI must not hurt (LADDER_PSI_FILE, 'some avg10=<max of them>',
+# written by the host). Levels, each entered after LADDER_Nk ticks in a row at >= LADDER_Tk %:
+#   L1: HOLD - no unpark. Running jobs are untouched.
+#   L2: LADDER_CGROUP/cpu.max = LADDER_CPU2 (the cgroup that holds dockerd, BuildKit and every
+#       container, so job-spawned containers and image builds are covered too).
+#   L3: cpu.max = LADDER_CPU3; after LADDER_PARK_AFTER_S at L3, park one IDLE runner per tick.
+#   A clamp is never below 2 CPUs: a starved listener could look offline and lose a job.
+# Step down one level after LADDER_CALM ticks below the current level's threshold. cpu.max is saved
+# when L2 is entered and written back exactly when the ladder drops below L2.
+# A missing input, or one older than LADDER_STALE_S, never escalates: the level holds, and after
+# LADDER_STALE_RESTORE_S of stale input the ladder goes back to L0.
+# Every tick at L2/L3 re-writes the level's value (a reboot resets the cgroup); LADDER=0 with a
+# saved value restores it. `mari-gate.sh --restore` restores and resets the ladder (run it before
+# stopping the timer). observe tracks and logs the levels, and writes, holds and parks nothing.
 set -uo pipefail
 RUNNER_PREFIX=runner-
 POOL_SIZE=10
@@ -57,6 +73,17 @@ EMERGENCY_PSI=30
 PSI_FILE=/proc/pressure/cpu
 PSI_MAX_AGE=120
 ALERT_CMD=
+LADDER=0
+LADDER_PSI_FILE=/run/mari-gate/wing-cpu-pressure
+LADDER_CGROUP=/sys/fs/cgroup/system.slice
+LADDER_T1=10; LADDER_T2=15; LADDER_T3=25
+LADDER_N1=3;  LADDER_N2=5;  LADDER_N3=10
+LADDER_CALM=5
+LADDER_CPU2="400000 100000"
+LADDER_CPU3="200000 100000"
+LADDER_STALE_S=90
+LADDER_STALE_RESTORE_S=600
+LADDER_PARK_AFTER_S=900
 CONF=${MARI_GATE_CONF:-/etc/mari-gate.conf}
 [ -f "$CONF" ] && . "$CONF"
 mkdir -p "$STATE/parked"
@@ -114,6 +141,66 @@ unpark(){
   fi
 }
 
+# --- throttle ladder ---
+ladder_floor(){ # "quota period" raised to at least 2 CPUs; "max ..." unchanged
+  local q p; read -r q p <<<"$1"
+  [ "$q" = max ] || { [ "$q" -lt $(( 2 * p )) ] && q=$(( 2 * p )); }; echo "$q $p"; }
+ladder_cpu(){ case "$1" in 2) ladder_floor "$LADDER_CPU2" ;; 3) ladder_floor "$LADDER_CPU3" ;; esac; }
+# Write cpu.max for level $1 (enforce only). <2 = the saved value (then forget it); >=2 = the level's clamp.
+ladder_apply(){ local cg="$LADDER_CGROUP/cpu.max" cur want
+  [ "$LADDER" = enforce ] || return 0
+  cur=$(cat "$cg" 2>/dev/null) || { log "ladder: cannot read $cg"; return 1; }
+  if [ "$1" -lt 2 ]; then
+    [ -f "$STATE/ladder_saved" ] || return 0
+    want=$(cat "$STATE/ladder_saved")
+    if [ "$cur" != "$want" ]; then echo "$want" > "$cg" || { log "ladder: restoring $cg to '$want' FAILED"; return 1; }
+      log "ladder: $cg restored to '$want' (was '$cur')"; fi
+    rm -f "$STATE/ladder_saved"; return 0
+  fi
+  [ -f "$STATE/ladder_saved" ] || echo "$cur" > "$STATE/ladder_saved"
+  want=$(ladder_cpu "$1")
+  if [ "$cur" != "$want" ]; then echo "$want" > "$cg" || { log "ladder: writing '$want' to $cg FAILED"; return 1; }
+    log "ladder: $cg = '$want' (was '$cur')"; fi; }
+ladder_restore(){ LADDER=enforce ladder_apply 0; rm -f "$STATE"/ladder_level "$STATE"/ladder_ticks "$STATE"/ladder_l3_since "$STATE"/ladder_stale_since; }
+# Fresh input value, or nothing (missing, unreadable or older than LADDER_STALE_S).
+ladder_psi(){ [ -r "$LADDER_PSI_FILE" ] || return 0
+  [ $(( $(date +%s) - $(stat -c %Y "$LADDER_PSI_FILE") )) -le "$LADDER_STALE_S" ] || return 0
+  sed -n 's/^some avg10=\([0-9.]*\).*/\1/p' "$LADDER_PSI_FILE" | head -1; }
+ge(){ awk -v a="$1" -v b="$2" 'BEGIN{exit !(a >= b)}'; }
+# Sets L (level) and wpsi (input, or 'stale'). Moves at most one level per tick.
+ladder_tick(){ local t=(0 "$LADDER_T1" "$LADDER_T2" "$LADDER_T3") n=(0 "$LADDER_N1" "$LADDER_N2" "$LADDER_N3") u c k new now
+  L=$(cat "$STATE/ladder_level" 2>/dev/null || echo 0); now=$(date +%s)
+  wpsi=$(ladder_psi)
+  if [ -z "$wpsi" ]; then
+    wpsi=stale; rm -f "$STATE/ladder_ticks"
+    if [ ! -f "$STATE/ladder_stale_since" ]; then echo "$now" > "$STATE/ladder_stale_since"
+      log "ladder: input $LADDER_PSI_FILE missing or older than ${LADDER_STALE_S}s: holding L$L, no escalation"; fi
+    if [ "$L" -gt 0 ] && [ $(( now - $(cat "$STATE/ladder_stale_since") )) -ge "$LADDER_STALE_RESTORE_S" ]; then
+      log "ladder: input stale for $(( (now - $(cat "$STATE/ladder_stale_since")) / 60 )) min: L$L -> L0 [$LADDER]"; L=0; echo 0 > "$STATE/ladder_level"; rm -f "$STATE/ladder_l3_since"; fi
+    ladder_apply "$L"; return 0
+  fi
+  [ -f "$STATE/ladder_stale_since" ] && { rm -f "$STATE/ladder_stale_since"; log "ladder: input fresh again (${wpsi}%)"; }
+  # $STATE/ladder_ticks: "<ticks >= T1> <ticks >= T2> <ticks >= T3> <calm ticks>"
+  read -r -a u < "$STATE/ladder_ticks" 2>/dev/null; [ "${#u[@]}" -eq 4 ] || u=(0 0 0 0); u=(0 "${u[@]}")
+  for k in 1 2 3; do if ge "$wpsi" "${t[$k]}"; then u[$k]=$(( u[k] + 1 )); else u[$k]=0; fi; done
+  c=${u[4]}; new=$L
+  if [ "$L" -lt 3 ] && [ "${u[$((L+1))]}" -ge "${n[$((L+1))]}" ]; then new=$(( L + 1 )); c=0
+  elif [ "$L" -gt 0 ]; then
+    if ge "$wpsi" "${t[$L]}"; then c=0; else c=$(( c + 1 )); fi
+    [ "$c" -ge "$LADDER_CALM" ] && { new=$(( L - 1 )); c=0; }
+  fi
+  u[4]=$c; echo "${u[*]:1}" > "$STATE/ladder_ticks"
+  if [ "$new" != "$L" ]; then
+    log "ladder: L$L -> L$new (wing CPU pressure ${wpsi}%) [$LADDER]"; L=$new; echo "$L" > "$STATE/ladder_level"
+    if [ "$L" = 3 ]; then echo "$now" > "$STATE/ladder_l3_since"; else rm -f "$STATE/ladder_l3_since"; fi
+  fi
+  ladder_apply "$L"; }
+
+if [ "${1:-}" = --restore ]; then ladder_restore; log "ladder: --restore done (cpu.max $(cat "$LADDER_CGROUP/cpu.max" 2>/dev/null))"; exit 0; fi
+L=0; wpsi=off
+if [ "$LADDER" = observe ] || [ "$LADDER" = enforce ]; then ladder_tick
+elif [ -f "$STATE/ladder_saved" ] || [ -f "$STATE/ladder_level" ]; then log "ladder: LADDER=$LADDER, cleaning up"; ladder_restore; fi
+
 load=$(cut -d' ' -f1 "$LOADAVG")
 high=$(awk -v l="$load" -v m="$LOAD_MAX" 'BEGIN{print (l >= m) ? 1 : 0}')
 nother=$(others)
@@ -124,7 +211,16 @@ for i in $(seq 1 "$POOL_SIZE"); do
   run+=("$i")
   if busy "$i"; then nbusy=$((nbusy+1)); else idle+=("$i"); fi
 done
-echo "$(date -u +%FT%TZ) load1=$load running=${#run[@]} busy=$nbusy idle=${#idle[@]} other=$nother cap=$CAP limit=$limit unpark_fail=$(cat "$STATE/unpark_fail" 2>/dev/null || echo 0) mode=$MODE" > "$STATE/status"
+echo "$(date -u +%FT%TZ) load1=$load running=${#run[@]} busy=$nbusy idle=${#idle[@]} other=$nother cap=$CAP limit=$limit unpark_fail=$(cat "$STATE/unpark_fail" 2>/dev/null || echo 0) mode=$MODE ladder=L$L/$LADDER wing_psi=$wpsi" > "$STATE/status"
+
+# Ladder L3 held long enough: park one IDLE runner per tick (park() re-checks busy and MIN_IDLE_S).
+if [ "$LADDER" = enforce ] && [ "$L" = 3 ] && [ -f "$STATE/ladder_l3_since" ] \
+   && [ $(( $(date +%s) - $(cat "$STATE/ladder_l3_since") )) -ge "$LADDER_PARK_AFTER_S" ]; then
+  for ((k=${#idle[@]}-1; k>=0; k--)); do
+    if park "${idle[$k]}" "ladder L3 for $(( ($(date +%s) - $(cat "$STATE/ladder_l3_since")) / 60 )) min, wing CPU pressure ${wpsi}%"; then
+      echo $(( $(cat "$STATE/ladder_parks" 2>/dev/null || echo 0) + 1 )) > "$STATE/ladder_parks"; break; fi
+  done
+fi
 
 if [ "$high" = 1 ]; then
   ht=$(( $(cat "$STATE/high_ticks" 2>/dev/null || echo 0) + 1 )); echo "$ht" > "$STATE/high_ticks"
@@ -161,7 +257,8 @@ if [ "$over" -gt 0 ]; then
   for ((k=${#idle[@]}-1; k>=0 && over>0; k--)); do park "${idle[$k]}" "cap $CAP, other jobs $nother"; over=$((over-1)); done
   exit 0
 fi
-# Under the cap: unpark, lowest index first, after the hold time.
+# Under the cap: unpark, lowest index first, after the hold time; not while the ladder holds (L1+).
+[ "$LADDER" = enforce ] && [ "$L" -ge 1 ] && exit 0
 last=$(cat "$STATE/last_park" 2>/dev/null || echo 0)
 [ $(( $(date +%s) - last )) -lt "$HOLD_S" ] && exit 0
 need=$(( limit - ${#run[@]} ))
