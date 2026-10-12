@@ -181,7 +181,10 @@ ladder_tick(){ local t=(0 "$LADDER_T1" "$LADDER_T2" "$LADDER_T3") n=(0 "$LADDER_
   fi
   [ -f "$STATE/ladder_stale_since" ] && { rm -f "$STATE/ladder_stale_since"; log "ladder: input fresh again (${wpsi}%)"; }
   # $STATE/ladder_ticks: "<ticks >= T1> <ticks >= T2> <ticks >= T3> <calm ticks>"
-  read -r -a u < "$STATE/ladder_ticks" 2>/dev/null; [ "${#u[@]}" -eq 4 ] || u=(0 0 0 0); u=(0 "${u[@]}")
+  # u must be set before the read: a missing file leaves it unset, and under set -u that aborted
+  # ladder_tick on every tick, so the counters were never stored and the ladder never escalated.
+  u=(); [ -f "$STATE/ladder_ticks" ] && read -r -a u < "$STATE/ladder_ticks"
+  [ "${#u[@]}" -eq 4 ] || u=(0 0 0 0); u=(0 "${u[@]}")
   for k in 1 2 3; do if ge "$wpsi" "${t[$k]}"; then u[$k]=$(( u[k] + 1 )); else u[$k]=0; fi; done
   c=${u[4]}; new=$L
   if [ "$L" -lt 3 ] && [ "${u[$((L+1))]}" -ge "${n[$((L+1))]}" ]; then new=$(( L + 1 )); c=0
