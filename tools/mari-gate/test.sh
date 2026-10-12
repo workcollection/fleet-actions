@@ -116,7 +116,9 @@ lt(){ export MG=$(mktemp -d -p "$tmp"); : > "$MG/calls"; echo "2.0 1 1 1/1 1" > 
   [ -n "${SAVED:-}" ] && echo "$SAVED" > "$MG/st/ladder_saved"
   [ -n "${STALE_SINCE:-}" ] && echo $(( $(date +%s) - STALE_SINCE )) > "$MG/st/ladder_stale_since"
   [ -n "${L3_SINCE:-}" ] && echo $(( $(date +%s) - L3_SINCE )) > "$MG/st/ladder_l3_since"
-  RUNNING="${10:-1 2 3}" BUSY="${9:-1}" OTHER="" LAUNCH_FAIL="" LATE="" ASSIGNED="" DONE="${DONE_L:-}" JUSTDONE="" MARI_GATE_CONF="$MG/conf" PATH="$tmp/bin:$PATH" bash "$here/mari-gate.sh" ${ARG:-} >/dev/null 2>&1
+  RUNNING="${10:-1 2 3}" BUSY="${9:-1}" OTHER="" LAUNCH_FAIL="" LATE="" ASSIGNED="" DONE="${DONE_L:-}" JUSTDONE="" MARI_GATE_CONF="$MG/conf" PATH="$tmp/bin:$PATH" bash "$here/mari-gate.sh" ${ARG:-} >/dev/null 2>"$MG/err"
+  # The ladder must never write to stderr: a shell error inside it aborts the ladder silently.
+  if grep -q . "$MG/err"; then echo "FAIL ladder: $1: stderr: $(head -2 "$MG/err" | tr '\n' ' ')"; fail=1; return; fi
   lvl=$(cat "$MG/st/ladder_level" 2>/dev/null || echo 0); cpu=$(cat "$MG/cg/cpu.max")
   launches=$(grep launch "$MG/calls" | awk '{print $2}' | sort -n | tr '\n' ' ' | sed 's/ $//')
   stops=$(grep 'docker stop' "$MG/calls" | awk '{print $NF}' | sed 's/runner-//' | tr '\n' ' ' | sed 's/ $//')
@@ -163,6 +165,17 @@ SAVED="$M" LADDER=0 lt "LADDER=0 with a saved value: restores" 30 3 "" 0 "200000
 [ ! -e "$MG/st/ladder_level" ] && [ ! -e "$MG/st/ladder_saved" ] && echo "PASS ladder: off cleans its state" || { echo "FAIL ladder: state left"; fail=1; }
 SAVED="$M" ARG=--restore lt "--restore: cpu.max back, ladder reset" 30 3 "9 9 9 0" 0 "200000 100000" "$M" ""
 SAVED="" ARG="" LADDER=""
+# From an EMPTY state (first deploy): ticks must accumulate across runs. 3 ticks at 12 % -> L1, then 5 at 16 % -> L2.
+MG=$(mktemp -d -p "$tmp"); export MG; : > "$MG/calls"; echo "2.0 1 1 1/1 1" > "$MG/loadavg"; mkdir -p "$MG/st" "$MG/cg"; echo "max 100000" > "$MG/cg/cpu.max"
+printf 'RUNNER_PREFIX=runner-\nPOOL_SIZE=10\nCAP=6\nLAUNCH_CMD=%s\nSTATE=%s/st\nLOADAVG=%s/loadavg\nMODE=enforce\nLADDER=enforce\nLADDER_PSI_FILE=%s/wing\nLADDER_CGROUP=%s/cg\n' "$tmp/launch.sh" "$MG" "$MG" "$MG" "$MG" > "$MG/conf"
+seq_out=""; errs=0
+for p in 12 12 12 16 16 16 16 16; do echo "some avg10=$p" > "$MG/wing"
+  RUNNING="1 2 3" BUSY="1" OTHER="" MARI_GATE_CONF="$MG/conf" PATH="$tmp/bin:$PATH" bash "$here/mari-gate.sh" >/dev/null 2>>"$MG/err"
+  seq_out="$seq_out$(cat "$MG/st/ladder_level" 2>/dev/null || echo 0)"; done
+[ ! -s "$MG/err" ] || errs=1
+[ "$seq_out" = "00111112" ] && [ "$errs" = 0 ] && [ "$(cat "$MG/cg/cpu.max")" = "400000 100000" ] \
+  && echo "PASS ladder: climbs from an empty state over 8 ticks (levels $seq_out)" \
+  || { echo "FAIL ladder: from empty state: levels $seq_out want 00111112, cpu.max '$(cat "$MG/cg/cpu.max")', stderr: $(head -2 "$MG/err" | tr '\n' ' ')"; fail=1; }
 # wing-psi.sh (host side): max over the given CTs; a missing CT is skipped; none readable = exit 1, no output.
 W=$(mktemp -d -p "$tmp"); for c in 110:0.50 114:12.40 116:3.00; do mkdir -p "$W/${c%%:*}"
   echo "some avg10=${c#*:} avg60=0.00 avg300=0.00 total=1" > "$W/${c%%:*}/cpu.pressure"; done
