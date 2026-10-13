@@ -47,7 +47,7 @@ wing-psi.sh 110 114 115 116 > /tmp/w && pct push 113 /tmp/w /run/mari-gate/wing-
 | L3 | ≥ `LADDER_T3` (25) % for `LADDER_N3` (10) ticks | `cpu.max` = `LADDER_CPU3` (2 CPUs); after `LADDER_PARK_AFTER_S` (900 s), park one **idle** runner per tick |
 
 - **One level per tick, both ways.** It steps down after `LADDER_CALM` (5) ticks below the current level's threshold.
-- **The clamp goes on the cgroup that holds dockerd and every container** (inside an LXC container: its own `/sys/fs/cgroup/system.slice`, writable from inside). So BuildKit steps and containers a job starts are covered. A per-runner `--cpus` limit does not cover those.
+- **The clamp goes on the cgroup that holds dockerd and every container** (inside an LXC container: its own `/sys/fs/cgroup/system.slice`, writable from inside). So image builds are covered whichever way BuildKit runs: inside dockerd (the default `docker` driver) or as `buildx_buildkit_*` containers (the `docker-container` driver, used by `docker/setup-buildx-action`). Containers a job starts are covered too. A per-runner `--cpus` limit covers none of these: they are siblings of the runner container, not its children.
 - **Floor of 2 CPUs.** A configured value below it is raised. Measured at 2 CPUs with a CPU burner saturating the clamp for 10 min: `docker ps`/`docker exec` latency unchanged (~300 ms), and no listener errors in any runner log.
 - **Exact restore.** `cpu.max` is saved when L2 is entered and written back exactly when the ladder drops below L2.
 - **Self-healing.** Every tick at L2/L3 re-writes the level's value, because a reboot resets the cgroup.
