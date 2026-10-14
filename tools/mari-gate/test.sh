@@ -159,6 +159,10 @@ L3_SINCE=1000 WANT_STOPS="" lt "L3: all busy: parks none" 30 3 "9 9 9 0" 3 "2000
 L3_SINCE="" WANT_STOPS=""
 # observe: levels are tracked and logged; nothing is written, held or parked.
 LADDER=observe lt "observe: L2 reached, no write, no hold" 16 1 "4 4 0 0" 2 "$M" "$M" "4 5 6"
+# enforce -> observe while clamped: observe restores the saved value (it used to keep the clamp until LADDER=0).
+SAVED="$M" LADDER=observe lt "observe after enforce: restores the clamp" 16 2 "4 4 0 0" 2 "400000 100000" "$M" "4 5 6"
+[ ! -e "$MG/st/ladder_saved" ] && echo "PASS ladder: observe forgets the saved value" || { echo "FAIL ladder: observe kept the saved value"; fail=1; }
+SAVED=""
 SAVED=""
 # Off with leftovers: LADDER=0 restores the saved value and forgets the ladder (the rollback path).
 SAVED="$M" LADDER=0 lt "LADDER=0 with a saved value: restores" 30 3 "" 0 "200000 100000" "$M" "4 5 6"

@@ -53,7 +53,7 @@ wing-psi.sh 110 114 115 116 > /tmp/w && pct push 113 /tmp/w /run/mari-gate/wing-
 - **Self-healing.** Every tick at L2/L3 re-writes the level's value, because a reboot resets the cgroup.
 - **Stale or missing input never escalates.** The level holds, and after `LADDER_STALE_RESTORE_S` (600 s) the ladder goes back to L0.
 - **Turning it off.** `LADDER=0` with a saved value restores it on the next tick (rollback = one config line). `mari-gate --restore` restores and resets now; run it before stopping the timer.
-- **observe** tracks and logs levels and changes nothing.
+- **observe** tracks and logs levels and changes nothing. Switched from enforce while clamped, it restores the saved `cpu.max` once.
 - **Status and journal.** The status line shows `ladder=L<n>/<mode> wing_psi=<value|stale|off>`. Every level change and every write goes to the journal.
 - **Emergency valve.** With the ladder on, set `EMERGENCY_LOAD=0`: L3 replaces it.
 
