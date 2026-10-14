@@ -148,6 +148,9 @@ ladder_floor(){ # "quota period" raised to at least 2 CPUs; "max ..." unchanged
 ladder_cpu(){ case "$1" in 2) ladder_floor "$LADDER_CPU2" ;; 3) ladder_floor "$LADDER_CPU3" ;; esac; }
 # Write cpu.max for level $1 (enforce only). <2 = the saved value (then forget it); >=2 = the level's clamp.
 ladder_apply(){ local cg="$LADDER_CGROUP/cpu.max" cur want
+  # enforce -> observe: a clamp from enforce must not stay; observe restores the saved value once.
+  if [ "$LADDER" = observe ] && [ -f "$STATE/ladder_saved" ]; then
+    log "ladder: LADDER=observe with an enforce clamp in place: restoring"; LADDER=enforce ladder_apply 0; return; fi
   [ "$LADDER" = enforce ] || return 0
   cur=$(cat "$cg" 2>/dev/null) || { log "ladder: cannot read $cg"; return 1; }
   if [ "$1" -lt 2 ]; then
