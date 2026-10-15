@@ -1,0 +1,100 @@
+name: 'Fleet db-service'
+description: 'A throwaway Postgres, MariaDB, MySQL or Redis the job reaches on 127.0.0.1, on self-hosted container runners too.'
+author: 'workcollection'
+
+# Why not `services:` or `docker run -p`: the self-hosted runner is itself a container on the
+# docker daemon, so a published port lands on the daemon host and the job gets "connection
+# refused" on 127.0.0.1 (measured 2026-10-15: catboyindustries-arg, server-manager and web-fapi
+# are red on n4-runner-* and green on runner-pve for exactly this reason; a fixed host port also
+# collides between parallel matrix legs). This action:
+# - runner is a container: the service joins the runner's network namespace (127.0.0.1:<default port>);
+# - otherwise (hosted runner, bare host): an ephemeral port published on 127.0.0.1.
+# It exports env-name (DATABASE_URL, REDIS_URL for redis) and, for databases, REQUIRE_DB_TESTS=1 so
+# tests that honour it fail instead of skip. Call it once per service; two services of the same
+# port (two MariaDBs) cannot share one runner namespace. Jobs with a `container:` key are not covered.
+#
+#   - uses: workcollection/fleet-actions/.github/actions/db-service@v2.3.0
+#     id: db
+#     with: { engine: mariadb }
+#   - uses: workcollection/fleet-actions/.github/actions/db-service@v2.3.0
+#     with: { engine: redis }
+#   - run: vendor/bin/phpunit
+#     env: { DB_HOST: 127.0.0.1, DB_PORT: '${{ steps.db.outputs.port }}' }
+#   - uses: workcollection/fleet-actions/.github/actions/db-service@v2.3.0
+#     if: always()
+#     with: { stop: 'true' }
+
+inputs:
+  engine:
+    description: 'postgres, mariadb, mysql or redis'
+    default: 'postgres'
+  user:
+    description: 'Database user (not root; ignored for redis)'
+    default: 'ci'
+  password:
+    description: 'Password of user (and of root for mariadb/mysql). Throwaway: the container lives only for this job'
+    default: 'ci'
+  db:
+    description: 'Database name (ignored for redis)'
+    default: 'ci'
+  image:
+    description: 'Image. Default: the ECR Public mirror of the Docker Official Image (postgres:16, mariadb:11, mysql:8.0, redis:7-alpine); the runners share an IP that hits the anonymous Docker Hub pull limit'
+    default: ''
+  fallback-image:
+    description: "Tried when the image cannot be pulled. Default: the same image on mirror.gcr.io. 'none' = no fallback"
+    default: ''
+  env-name:
+    description: 'Environment variable that gets the connection URL. Default: DATABASE_URL (REDIS_URL for redis)'
+    default: ''
+  require-db-tests:
+    description: "'true' also sets REQUIRE_DB_TESTS=1 for later steps (databases only)"
+    default: 'true'
+  timeout-s:
+    description: 'Seconds to wait until the service accepts connections from the job'
+    default: '90'
+  stale-after-s:
+    description: "Remove this action's containers older than this (left by killed runs)"
+    default: '10800'
+  stop:
+    description: "'true' removes every container this job started with this action (use with if: always())"
+    default: 'false'
+
+outputs:
+  url:
+    description: 'Connection URL'
+    value: ${{ steps.start.outputs.url }}
+  host:
+    description: 'Always 127.0.0.1'
+    value: ${{ steps.start.outputs.host }}
+  port:
+    description: 'Port on 127.0.0.1'
+    value: ${{ steps.start.outputs.port }}
+  name:
+    description: 'Container name'
+    value: ${{ steps.start.outputs.name }}
+
+runs:
+  using: composite
+  steps:
+    - id: start
+      if: inputs.stop != 'true'
+      shell: bash
+      env:
+        DB_ENGINE: ${{ inputs.engine }}
+        DB_USER: ${{ inputs.user }}
+        DB_PASSWORD: ${{ inputs.password }}
+        DB_NAME: ${{ inputs.db }}
+        DB_IMAGE: ${{ inputs.image }}
+        DB_FALLBACK_IMAGE: ${{ inputs.fallback-image }}
+        DB_ENV_NAME: ${{ inputs.env-name }}
+        DB_REQUIRE: ${{ inputs.require-db-tests }}
+        DB_TIMEOUT_S: ${{ inputs.timeout-s }}
+        DB_STALE_S: ${{ inputs.stale-after-s }}
+      run: '"$GITHUB_ACTION_PATH/start.sh"'
+    - if: inputs.stop == 'true'
+      shell: bash
+      run: '"$GITHUB_ACTION_PATH/stop.sh"'
+
+branding:
+  icon: 'database'
+  color: 'purple'
