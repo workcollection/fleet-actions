@@ -1,0 +1,84 @@
+name: 'Fleet postgres'
+description: 'A throwaway Postgres the job reaches on 127.0.0.1, on self-hosted container runners too.'
+author: 'workcollection'
+
+# Why not a `services:` container: the self-hosted runner is itself a container on the docker
+# daemon, so a service's published port lands on the daemon host and the job gets "connection
+# refused" on localhost. The DB tests then skip, and CI looks green without running them
+# (cat-waf: no DB test had ever run in CI). This action starts Postgres with `docker run`:
+# - runner is a container: postgres joins the runner's network namespace, 127.0.0.1:5432;
+# - otherwise (hosted runner, bare host): an ephemeral port published on 127.0.0.1.
+# It sets DATABASE_URL (or env-name) and REQUIRE_DB_TESTS=1, so tests that honour it fail
+# instead of skip when the database is unreachable. Jobs with a `container:` key are not covered.
+#
+#   - uses: workcollection/fleet-actions/.github/actions/postgres@v2.2.0
+#   - run: go test ./...
+#   - uses: workcollection/fleet-actions/.github/actions/postgres@v2.2.0
+#     if: always()
+#     with: { stop: 'true' }
+
+inputs:
+  user:
+    description: 'POSTGRES_USER'
+    default: 'ci'
+  password:
+    description: 'POSTGRES_PASSWORD (throwaway; the database lives only for this job)'
+    default: 'ci'
+  db:
+    description: 'POSTGRES_DB'
+    default: 'ci'
+  image:
+    description: 'Image. ECR Public mirror of the Docker Official Image: the runners share an IP that hits the anonymous Docker Hub pull limit'
+    default: 'public.ecr.aws/docker/library/postgres:16'
+  env-name:
+    description: 'Environment variable that gets the connection URL'
+    default: 'DATABASE_URL'
+  require-db-tests:
+    description: "'true' also sets REQUIRE_DB_TESTS=1 for later steps"
+    default: 'true'
+  timeout-s:
+    description: 'Seconds to wait until postgres accepts connections from the job'
+    default: '60'
+  stale-after-s:
+    description: "Remove this action's containers older than this (left by killed runs)"
+    default: '10800'
+  stop:
+    description: "'true' removes the container this job started (use with if: always())"
+    default: 'false'
+
+outputs:
+  url:
+    description: 'Connection URL'
+    value: ${{ steps.start.outputs.url }}
+  port:
+    description: 'Port on 127.0.0.1'
+    value: ${{ steps.start.outputs.port }}
+  name:
+    description: 'Container name'
+    value: ${{ steps.start.outputs.name }}
+
+runs:
+  using: composite
+  steps:
+    - id: start
+      if: inputs.stop != 'true'
+      shell: bash
+      env:
+        PG_USER: ${{ inputs.user }}
+        PG_PASSWORD: ${{ inputs.password }}
+        PG_DB: ${{ inputs.db }}
+        PG_IMAGE: ${{ inputs.image }}
+        PG_ENV_NAME: ${{ inputs.env-name }}
+        PG_REQUIRE: ${{ inputs.require-db-tests }}
+        PG_TIMEOUT_S: ${{ inputs.timeout-s }}
+        PG_STALE_S: ${{ inputs.stale-after-s }}
+      run: '"$GITHUB_ACTION_PATH/start.sh"'
+    - if: inputs.stop == 'true'
+      shell: bash
+      run: |
+        if [ -n "${FLEET_PG_NAME:-}" ]; then docker rm -f "$FLEET_PG_NAME" >/dev/null 2>&1 || true; echo "removed $FLEET_PG_NAME"
+        else echo "no postgres started in this job"; fi
+
+branding:
+  icon: 'database'
+  color: 'purple'

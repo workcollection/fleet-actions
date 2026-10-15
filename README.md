@@ -49,6 +49,7 @@ propagate, one reviewable PR per repo. (`v1` predates the ruleset and stays wher
 | `setup-go` | 53 repos (52 identical args) | Pin skew only: v7/v6/v5. |
 | `setup-buildx` | 21 repos, all zero-arg | Pin skew only: v4/v3/v3.7.1. |
 | `docker-build-push` | 7 repos | Defaults to GHA cache `mode=min` with a ref-scoped key. `mode=max` blew past the 10GB per-repo cache cap (one repo sat at 10.7GB, so the cache evicted itself continuously). |
+| `postgres` | cat-guard, cat-waf (copied block) | A throwaway Postgres on 127.0.0.1 via `docker run`. A `services:` container is unreachable from a self-hosted runner container, so DB tests skipped and CI looked green. Sets `DATABASE_URL` and `REQUIRE_DB_TESTS=1`; `with: { stop: 'true' }` + `if: always()` removes it, and containers of killed runs are removed after 3 h. |
 
 ### setup-php: why the odd shape
 

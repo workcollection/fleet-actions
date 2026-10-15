@@ -122,6 +122,43 @@ jobs:
             || { echo "::error::wrong PHP version after install"; exit 1; }
           php -m | grep -qi '^curl$' || { echo "::error::requested extension curl missing"; exit 1; }
 
+  smoke-postgres:
+    # Both network paths of the postgres action: the hosted runner is a bare host (ephemeral
+    # port), and a docker:cli container on the same daemon stands in for a self-hosted runner
+    # container (shared network namespace, 127.0.0.1:5432).
+    name: Smoke - postgres (host + runner-container path)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - id: pg
+        uses: ./.github/actions/postgres
+      - name: Assert the job reaches it and the env is set
+        env:
+          PORT: ${{ steps.pg.outputs.port }}
+        run: |
+          set -euo pipefail
+          test "$REQUIRE_DB_TESTS" = 1
+          test -n "$PORT" && test "$PORT" != 5432
+          test "$(psql "$DATABASE_URL" -tAc 'select 1')" = 1
+          echo "host path OK on port $PORT"
+      - uses: ./.github/actions/postgres
+        if: always()
+        with: { stop: 'true' }
+      - name: Assert stop removed it
+        run: test -z "$(docker ps -aq --filter "name=^${FLEET_PG_NAME}$")"
+      - name: Runner-container path
+        run: |
+          set -euo pipefail
+          t=$(mktemp -d); : > "$t/env"; : > "$t/out"
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$PWD/.github/actions/postgres:/a:ro" -v "$t:/t" \
+            -e PG_USER=ci -e PG_PASSWORD=ci -e PG_DB=ci -e PG_IMAGE=public.ecr.aws/docker/library/postgres:16 \
+            -e PG_ENV_NAME=DATABASE_URL -e PG_REQUIRE=true -e PG_TIMEOUT_S=60 -e PG_STALE_S=10800 \
+            -e GITHUB_ENV=/t/env -e GITHUB_OUTPUT=/t/out \
+            public.ecr.aws/docker/library/docker:cli sh -c 'apk add -q bash coreutils && bash /a/start.sh'
+          grep -q '^DATABASE_URL=postgres://.*@127.0.0.1:5432/' "$t/env"
+          grep -qx 'port=5432' "$t/out"
+          docker rm -f "$(sed -n 's/^FLEET_PG_NAME=//p' "$t/env")" >/dev/null
+
   pvr-self:
     # Dogfood: the same check every consumer will run, against this repo. Advisory,
     # so a finding here (PVR still off, no SECURITY.md yet) reports without blocking.
