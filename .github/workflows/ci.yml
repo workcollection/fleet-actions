@@ -151,10 +151,10 @@ jobs:
           set -euo pipefail
           t=$(mktemp -d); : > "$t/env"; : > "$t/out"
           docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$PWD/.github/actions/postgres:/a:ro" -v "$t:/t" \
-            -e PG_USER=ci -e PG_PASSWORD=ci -e PG_DB=ci -e PG_IMAGE=public.ecr.aws/docker/library/postgres:16 \
+            -e PG_USER=ci -e PG_PASSWORD=ci -e PG_DB=ci -e PG_IMAGE=public.ecr.aws/docker/library/postgres:16 -e PG_FALLBACK_IMAGE=mirror.gcr.io/library/postgres:16 \
             -e PG_ENV_NAME=DATABASE_URL -e PG_REQUIRE=true -e PG_TIMEOUT_S=60 -e PG_STALE_S=10800 \
             -e GITHUB_ENV=/t/env -e GITHUB_OUTPUT=/t/out \
-            public.ecr.aws/docker/library/docker:cli sh -c 'apk add -q bash coreutils && bash /a/start.sh'
+            mirror.gcr.io/library/docker:cli sh -c 'apk add -q bash coreutils && bash /a/start.sh'
           grep -q '^DATABASE_URL=postgres://.*@127.0.0.1:5432/' "$t/env"
           grep -qx 'port=5432' "$t/out"
           docker rm -f "$(sed -n 's/^FLEET_PG_NAME=//p' "$t/env")" >/dev/null

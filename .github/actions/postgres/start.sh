@@ -8,6 +8,18 @@ docker ps -a --filter "label=$label" --format '{{.ID}} {{.CreatedAt}}' | while r
   c=$(date -d "$d $t $z" +%s 2>/dev/null) || continue
   if [ $(( now - c )) -gt "$PG_STALE_S" ]; then echo "removing stale postgres $id (created $d $t $z)"; docker rm -f "$id" >/dev/null || true; fi
 done
+# Pull first, with retries and a second registry: a shared runner IP can exhaust the anonymous
+# limit of one mirror ("toomanyrequests: Data limit exceeded" from ECR Public on hosted runners).
+img=""
+for try in 1 2 3; do
+  for c in $PG_IMAGE ${PG_FALLBACK_IMAGE:-}; do
+    if docker image inspect "$c" >/dev/null 2>&1 || docker pull -q "$c" >/dev/null; then img=$c; break 2; fi
+    echo "pull of $c failed (round $try)"
+  done
+  [ "$try" -lt 3 ] && sleep $(( 5 * try ))
+done
+[ -n "$img" ] || { echo "no postgres image could be pulled from: $PG_IMAGE ${PG_FALLBACK_IMAGE:-}"; exit 1; }
+echo "image: $img"
 # Random suffix: matrix legs of one run can share a daemon.
 name="fleet-pg-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-0}-$RANDOM$RANDOM"
 envs=(-e "POSTGRES_USER=$PG_USER" -e "POSTGRES_PASSWORD=$PG_PASSWORD" -e "POSTGRES_DB=$PG_DB")
@@ -17,11 +29,11 @@ for c in "$(hostname)" "$(grep -oE '/docker/containers/[0-9a-f]{64}' /proc/self/
 done
 if [ -n "$self" ]; then
   echo "runner is container $self: postgres shares its network namespace"
-  docker run -d --name "$name" --label "$label=1" --network "container:$self" "${envs[@]}" "$PG_IMAGE" >/dev/null
+  docker run -d --name "$name" --label "$label=1" --network "container:$self" "${envs[@]}" "$img" >/dev/null
   port=5432
 else
   echo "runner is not a container on this daemon: publishing an ephemeral port"
-  docker run -d --name "$name" --label "$label=1" -p 127.0.0.1::5432 "${envs[@]}" "$PG_IMAGE" >/dev/null
+  docker run -d --name "$name" --label "$label=1" -p 127.0.0.1::5432 "${envs[@]}" "$img" >/dev/null
   port=$(docker port "$name" 5432/tcp | head -1 | sed 's/.*://')
 fi
 echo "FLEET_PG_NAME=$name" >> "$GITHUB_ENV"

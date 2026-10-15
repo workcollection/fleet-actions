@@ -30,6 +30,9 @@ inputs:
   image:
     description: 'Image. ECR Public mirror of the Docker Official Image: the runners share an IP that hits the anonymous Docker Hub pull limit'
     default: 'public.ecr.aws/docker/library/postgres:16'
+  fallback-image:
+    description: 'Tried when the image cannot be pulled (another registry, another anonymous limit). Empty = none'
+    default: 'mirror.gcr.io/library/postgres:16'
   env-name:
     description: 'Environment variable that gets the connection URL'
     default: 'DATABASE_URL'
@@ -68,6 +71,7 @@ runs:
         PG_PASSWORD: ${{ inputs.password }}
         PG_DB: ${{ inputs.db }}
         PG_IMAGE: ${{ inputs.image }}
+        PG_FALLBACK_IMAGE: ${{ inputs.fallback-image }}
         PG_ENV_NAME: ${{ inputs.env-name }}
         PG_REQUIRE: ${{ inputs.require-db-tests }}
         PG_TIMEOUT_S: ${{ inputs.timeout-s }}
