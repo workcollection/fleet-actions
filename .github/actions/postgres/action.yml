@@ -10,6 +10,7 @@ author: 'workcollection'
 # - otherwise (hosted runner, bare host): an ephemeral port published on 127.0.0.1.
 # It sets DATABASE_URL (or env-name) and REQUIRE_DB_TESTS=1, so tests that honour it fail
 # instead of skip when the database is unreachable. Jobs with a `container:` key are not covered.
+# Since v2.3.0 this is db-service with engine: postgres (same inputs, same behaviour).
 #
 #   - uses: workcollection/fleet-actions/.github/actions/postgres@v2.2.0
 #   - run: go test ./...
@@ -67,21 +68,20 @@ runs:
       if: inputs.stop != 'true'
       shell: bash
       env:
-        PG_USER: ${{ inputs.user }}
-        PG_PASSWORD: ${{ inputs.password }}
-        PG_DB: ${{ inputs.db }}
-        PG_IMAGE: ${{ inputs.image }}
-        PG_FALLBACK_IMAGE: ${{ inputs.fallback-image }}
-        PG_ENV_NAME: ${{ inputs.env-name }}
-        PG_REQUIRE: ${{ inputs.require-db-tests }}
-        PG_TIMEOUT_S: ${{ inputs.timeout-s }}
-        PG_STALE_S: ${{ inputs.stale-after-s }}
-      run: '"$GITHUB_ACTION_PATH/start.sh"'
+        DB_ENGINE: postgres
+        DB_USER: ${{ inputs.user }}
+        DB_PASSWORD: ${{ inputs.password }}
+        DB_NAME: ${{ inputs.db }}
+        DB_IMAGE: ${{ inputs.image }}
+        DB_FALLBACK_IMAGE: ${{ inputs.fallback-image || 'none' }}
+        DB_ENV_NAME: ${{ inputs.env-name }}
+        DB_REQUIRE: ${{ inputs.require-db-tests }}
+        DB_TIMEOUT_S: ${{ inputs.timeout-s }}
+        DB_STALE_S: ${{ inputs.stale-after-s }}
+      run: '"$GITHUB_ACTION_PATH/../db-service/start.sh"'
     - if: inputs.stop == 'true'
       shell: bash
-      run: |
-        if [ -n "${FLEET_PG_NAME:-}" ]; then docker rm -f "$FLEET_PG_NAME" >/dev/null 2>&1 || true; echo "removed $FLEET_PG_NAME"
-        else echo "no postgres started in this job"; fi
+      run: '"$GITHUB_ACTION_PATH/../db-service/stop.sh"'
 
 branding:
   icon: 'database'

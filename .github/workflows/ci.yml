@@ -122,42 +122,68 @@ jobs:
             || { echo "::error::wrong PHP version after install"; exit 1; }
           php -m | grep -qi '^curl$' || { echo "::error::requested extension curl missing"; exit 1; }
 
-  smoke-postgres:
-    # Both network paths of the postgres action: the hosted runner is a bare host (ephemeral
-    # port), and a docker:cli container on the same daemon stands in for a self-hosted runner
-    # container (shared network namespace, 127.0.0.1:5432).
-    name: Smoke - postgres (host + runner-container path)
+  smoke-db-service:
+    # Both network paths of db-service: the hosted runner is a bare host (ephemeral ports), and a
+    # docker:cli container on the same daemon stands in for a self-hosted runner container (shared
+    # network namespace, default ports). Every engine is checked with a real client from the job.
+    name: Smoke - db-service (postgres, mariadb, mysql, redis; host + runner-container path)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - id: pg
         uses: ./.github/actions/postgres
-      - name: Assert the job reaches it and the env is set
+      - id: maria
+        uses: ./.github/actions/db-service
+        with: { engine: mariadb, env-name: MARIA_URL }
+      - id: my
+        uses: ./.github/actions/db-service
+        with: { engine: mysql, env-name: MYSQL_URL }
+      - id: redis
+        uses: ./.github/actions/db-service
+        with: { engine: redis }
+      - name: Assert the job reaches every service and the env is set
         env:
-          PORT: ${{ steps.pg.outputs.port }}
+          PG_PORT: ${{ steps.pg.outputs.port }}
+          MARIA_PORT: ${{ steps.maria.outputs.port }}
+          MY_PORT: ${{ steps.my.outputs.port }}
+          REDIS_PORT: ${{ steps.redis.outputs.port }}
         run: |
           set -euo pipefail
           test "$REQUIRE_DB_TESTS" = 1
-          test -n "$PORT" && test "$PORT" != 5432
           test "$(psql "$DATABASE_URL" -tAc 'select 1')" = 1
-          echo "host path OK on port $PORT"
-      - uses: ./.github/actions/postgres
+          test "$(mysql -h 127.0.0.1 -P "$MARIA_PORT" -u ci -pci -N -e 'select 1' ci)" = 1
+          test "$(mysql -h 127.0.0.1 -P "$MY_PORT" -u ci -pci -N -e 'select 1' ci)" = 1
+          exec 3<>"/dev/tcp/127.0.0.1/$REDIS_PORT"; printf 'PING\r\n' >&3; read -r pong <&3; test "${pong%$'\r'}" = +PONG
+          test "$REDIS_URL" = "redis://127.0.0.1:$REDIS_PORT"
+          test "$(wc -w <<<"$FLEET_DB_NAMES")" = 4
+          echo "host path OK: postgres $PG_PORT, mariadb $MARIA_PORT, mysql $MY_PORT, redis $REDIS_PORT"
+      - uses: ./.github/actions/db-service
         if: always()
         with: { stop: 'true' }
-      - name: Assert stop removed it
-        run: test -z "$(docker ps -aq --filter "name=^${FLEET_PG_NAME}$")"
-      - name: Runner-container path
+      - name: Assert stop removed all of them
+        run: test -z "$(docker ps -aq --filter label=org.catboy.fleet-db)"
+      - name: Runner-container path (and a leftover in the same namespace is replaced)
         run: |
           set -euo pipefail
-          t=$(mktemp -d); : > "$t/env"; : > "$t/out"
-          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$PWD/.github/actions/postgres:/a:ro" -v "$t:/t" \
-            -e PG_USER=ci -e PG_PASSWORD=ci -e PG_DB=ci -e PG_IMAGE=public.ecr.aws/docker/library/postgres:16 -e PG_FALLBACK_IMAGE=mirror.gcr.io/library/postgres:16 \
-            -e PG_ENV_NAME=DATABASE_URL -e PG_REQUIRE=true -e PG_TIMEOUT_S=60 -e PG_STALE_S=10800 \
-            -e GITHUB_ENV=/t/env -e GITHUB_OUTPUT=/t/out \
-            mirror.gcr.io/library/docker:cli sh -c 'apk add -q bash coreutils && bash /a/start.sh'
-          grep -q '^DATABASE_URL=postgres://.*@127.0.0.1:5432/' "$t/env"
-          grep -qx 'port=5432' "$t/out"
-          docker rm -f "$(sed -n 's/^FLEET_PG_NAME=//p' "$t/env")" >/dev/null
+          t=$(mktemp -d)
+          # A long-lived container with the docker CLI stands in for a runner container that runs
+          # several jobs one after the other.
+          docker run -d --name fake-runner -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "$PWD/.github/actions/db-service:/a:ro" -v "$t:/t" mirror.gcr.io/library/docker:cli sleep 900 >/dev/null
+          docker exec fake-runner apk add -q bash coreutils
+          job() { : > "$t/env"; : > "$t/out"
+            docker exec -e FLEET_DB_NAMES="${FLEET_DB_NAMES:-}" -e DB_ENGINE="$1" -e DB_USER=ci -e DB_PASSWORD=ci -e DB_NAME=ci -e DB_REQUIRE=true \
+              -e DB_TIMEOUT_S=90 -e DB_STALE_S=10800 -e GITHUB_ENV=/t/env -e GITHUB_OUTPUT=/t/out fake-runner bash /a/start.sh; }
+          job postgres; grep -qx 'port=5432' "$t/out"; first=$(sed -n 's/^name=//p' "$t/out")
+          # the "killed" first job never ran stop: the next job must replace its container, not fail on 5432
+          job postgres; grep -qx 'port=5432' "$t/out"
+          test -z "$(docker ps -aq --filter "name=^${first}$")"
+          # one job with two services: starting redis must keep this job's mariadb
+          job mariadb; grep -qx 'port=3306' "$t/out"; maria=$(sed -n 's/^name=//p' "$t/out")
+          FLEET_DB_NAMES=$maria job redis; grep -qx 'port=6379' "$t/out"
+          test -n "$(docker ps -q --filter "name=^${maria}$")"
+          docker ps -aq --filter label=org.catboy.fleet-db | xargs -r docker rm -f >/dev/null; docker rm -f fake-runner >/dev/null
+          echo "runner-container path OK (postgres twice, mariadb, redis)"
 
   pvr-self:
     # Dogfood: the same check every consumer will run, against this repo. Advisory,
