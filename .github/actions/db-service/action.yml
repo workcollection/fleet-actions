@@ -12,6 +12,8 @@ author: 'workcollection'
 # It exports env-name (DATABASE_URL, REDIS_URL for redis) and, for databases, REQUIRE_DB_TESTS=1 so
 # tests that honour it fail instead of skip. Call it once per service; two services of the same
 # port (two MariaDBs) cannot share one runner namespace. Jobs with a `container:` key are not covered.
+# Needs a docker daemon the job can reach: the polo-nyan per-repo runners have none (no docker.sock), so
+# a DB job there runs on ubuntu-latest (erpmanager-main #145, 2026-10-16).
 #
 #   - uses: workcollection/fleet-actions/.github/actions/db-service@v2.3.0
 #     id: db
