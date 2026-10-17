@@ -79,10 +79,10 @@ on:
         required: false
         default: false
       retention-days:
-        description: 'Days to keep the signed-files artifact (1-90). It is a handoff within one run (sign -> your publish job), so keep it short: every copy counts against the org storage quota.'
+        description: 'Days to keep the signed-files artifact (1-90). It is a handoff within one run (sign -> your publish job), so 1 is enough: every copy counts against the org storage quota. Raise it only when the publish job runs days later.'
         type: number
         required: false
-        default: 3
+        default: 1
     outputs:
       signed:
         description: 'true when every requested file was signed AND verified'

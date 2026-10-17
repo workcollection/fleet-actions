@@ -157,7 +157,7 @@ jobs:
     needs: build
     permissions: { contents: read, id-token: write, attestations: write }
     uses: workcollection/fleet-actions/.github/workflows/catboy-sign.yml@v2.1.8
-    with: { artifact-name: binaries, runs-on: self-hosted }   # retention-days: 3 by default (1-90)
+    with: { artifact-name: binaries, runs-on: self-hosted }   # retention-days: 1 by default (1-90)
   release:
     needs: sign
     steps:
@@ -165,9 +165,37 @@ jobs:
         with: { name: ${{ needs.sign.outputs.artifact }}, path: out }
 ```
 
-The signed copy is uploaded as an artifact kept for `retention-days` (default 3, from 2.1.8;
-it used to be a fixed 7). It is only a handoff to your publish job in the same run, so 1 is
-enough when that job runs right after. Every copy counts against the org's Actions storage.
+The signed copy is uploaded as an artifact kept for `retention-days` (default 1; it was 3 in
+2.1.8 and a fixed 7 before). It is only a handoff to your publish job in the same run. Every
+copy counts against the org's Actions storage, and a release that signs one large file in two
+passes stores it four times (two inputs, two `-signed` copies). So:
+
+- upload your own input artifact with `retention-days: 1` too;
+- delete both artifacts in the publish job once it has downloaded them. catboy-sign cannot do
+  this itself: it would need `actions: write`, and a caller that grants less gets a
+  `startup_failure`. Your publish job has its own permissions:
+
+```yaml
+  release:
+    needs: sign
+    permissions: { contents: write, actions: write }
+    steps:
+      - uses: actions/download-artifact@…
+        with: { name: ${{ needs.sign.outputs.artifact }}, path: out }
+      # … publish out/ …
+      - name: Delete the hand-off artifacts (storage quota)
+        if: always()
+        uses: actions/github-script@…
+        with:
+          script: |
+            const names = ['binaries', 'binaries-signed'];
+            const arts = await github.paginate(github.rest.actions.listWorkflowRunArtifacts,
+              { owner: context.repo.owner, repo: context.repo.repo, run_id: context.runId });
+            for (const a of arts.filter(a => names.includes(a.name))) {
+              await github.rest.actions.deleteArtifact({ owner: context.repo.owner, repo: context.repo.repo, artifact_id: a.id });
+              core.info(`deleted ${a.name} (${a.size_in_bytes} bytes)`);
+            }
+```
 
 The `sign` job must grant all three permissions, **even with `attest: false`**: the workflow
 requests them at the top level, and GitHub refuses to start a run whose caller grants less
