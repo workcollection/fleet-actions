@@ -102,12 +102,13 @@ fs "streak continues, no repeat alert"   3   6 0
 fs "repeat alert at 12*FAIL_ALERT"       34  37 1
 LAUNCH_FAIL="" STREAK=5 t "a successful unpark resets the streak" 2.0 "1 2 3" "1" 300 "" "4 5 6"
 [ ! -e "$MG/st/unpark_fail" ] && echo "PASS streak file removed on success" || { echo "FAIL streak file still there"; fail=1; }
-# Throttle ladder. lt <name> <wing psi|"" (missing)> <level before> <ticks before "u1 u2 u3 calm"> <cpu.max before>
-#   <want level> <want cpu.max> <want launches> [busy] [running]. Runners 1-3 run, runner 1 busy, HOLD_S passed,
-#   so a tick that does not hold unparks 4 5 6.
+# Throttle ladder. lt <name> <wing psi|"" (missing)> <level before> <ticks before "calm v1 .. vk"> <cpu.max before>
+#   <want level> <want cpu.max> <want launches> [busy|none] [running]. Runners 1-3 run, runner 1 busy, HOLD_S passed,
+#   so a tick that does not hold unparks 4 5 6. Uptime 99999 s unless UPTIME is set.
 lt(){ export MG=$(mktemp -d -p "$tmp"); : > "$MG/calls"; echo "2.0 1 1 1/1 1" > "$MG/loadavg"; mkdir -p "$MG/st" "$MG/cg"
-  printf 'RUNNER_PREFIX=runner-\nPOOL_SIZE=10\nCAP=6\nLOAD_MAX=8\nHOLD_S=120\nLAUNCH_CMD=%s\nSTATE=%s/st\nLOADAVG=%s/loadavg\nMODE=enforce\nLOAD_PARK=0\nLADDER=%s\nLADDER_PSI_FILE=%s/wing\nLADDER_CGROUP=%s/cg\nLADDER_CPU3="%s"\n' \
-    "$tmp/launch.sh" "$MG" "$MG" "${LADDER:-enforce}" "$MG" "$MG" "${CPU3:-200000 100000}" > "$MG/conf"
+  printf 'RUNNER_PREFIX=runner-\nPOOL_SIZE=10\nCAP=6\nLOAD_MAX=8\nHOLD_S=120\nLAUNCH_CMD=%s\nSTATE=%s/st\nLOADAVG=%s/loadavg\nMODE=enforce\nLOAD_PARK=0\nLADDER=%s\nLADDER_PSI_FILE=%s/wing\nLADDER_CGROUP=%s/cg\nLADDER_CPU3="%s"\nLADDER_UPTIME_FILE=%s/uptime\n%s\n' \
+    "$tmp/launch.sh" "$MG" "$MG" "${LADDER:-enforce}" "$MG" "$MG" "${CPU3:-200000 100000}" "$MG" "${EXTRA:-}" > "$MG/conf"
+  echo "${UPTIME:-99999}.00 1.00" > "$MG/uptime"
   echo "$6" > "$MG/cg/cpu.max"; echo $(( $(date +%s) - 300 )) > "$MG/st/last_park"
   [ -n "$2" ] && echo "some avg10=$2 max_of=116" > "$MG/wing"
   [ -n "${STALE_FILE:-}" ] && touch -d '5 minutes ago' "$MG/wing"
@@ -124,54 +125,71 @@ lt(){ export MG=$(mktemp -d -p "$tmp"); : > "$MG/calls"; echo "2.0 1 1 1/1 1" > 
   stops=$(grep 'docker stop' "$MG/calls" | awk '{print $NF}' | sed 's/runner-//' | tr '\n' ' ' | sed 's/ $//')
   if [ "$lvl" = "$5" ] && [ "$cpu" = "$7" ] && [ "$launches" = "$8" ] && [ "$stops" = "${WANT_STOPS:-}" ]; then echo "PASS ladder: $1"
   else echo "FAIL ladder: $1: level $lvl want $5, cpu.max '$cpu' want '$7', launches [$launches] want [$8], stops [$stops] want [${WANT_STOPS:-}]"; fail=1; fi; }
-M="max 100000"
+M="max 100000"; V9="30 30 30 30 30 30 30 30 30"
 lt "calm input at L0: unparks, no write"              5    ""  ""         0 "$M" "$M" "4 5 6"
-lt "2 ticks >= 10: still L0"                          12   0   "1 0 0 0" 0 "$M" "$M" "4 5 6"
-lt "3rd tick >= 10: L1 holds (no unpark), no write"   12   0   "2 0 0 0" 1 "$M" "$M" ""
-lt "L1, 5th tick >= 15: L2 clamps 4 CPUs"             16   1   "4 4 0 0" 2 "$M" "400000 100000" ""
+lt "2 ticks >= 10: still L0"                          12   0   "0 12" 0 "$M" "$M" "4 5 6"
+lt "3rd tick >= 10: L1 holds (no unpark), no write"   12   0   "0 12 12" 1 "$M" "$M" ""
+lt "L1, 5th tick >= 15: L2 clamps 4 CPUs"             16   1   "0 16 16 16 16" 2 "$M" "400000 100000" ""
 [ "$(cat "$MG/st/ladder_saved")" = "$M" ] && echo "PASS ladder: L2 saved the previous cpu.max" || { echo "FAIL ladder: saved value"; fail=1; }
 SAVED="$M"
-lt "L2, 10th tick >= 25: L3 clamps 2 CPUs"            30   2   "9 9 9 0" 3 "400000 100000" "200000 100000" ""
-lt "one level per tick: L1 -> L2 even at 99 %"        99   1   "9 9 9 0" 2 "$M" "400000 100000" ""
-lt "L2, 4 calm ticks: stays"                          5    2   "0 0 0 3" 2 "400000 100000" "400000 100000" ""
-lt "L2, 5th calm tick: L1, restores exactly"          5    2   "0 0 0 4" 1 "400000 100000" "$M" ""
+lt "L2, 10th tick >= 25: L3 clamps 2 CPUs"            30   2   "0 $V9" 3 "400000 100000" "200000 100000" ""
+lt "one level per tick: L1 -> L2 even at 99 %"        99   1   "0 $V9" 2 "$M" "400000 100000" ""
+lt "L2, 4 calm ticks: stays"                          5    2   "3" 2 "400000 100000" "400000 100000" ""
+lt "L2, 5th calm tick: L1, restores exactly"          5    2   "4" 1 "400000 100000" "$M" ""
 [ ! -e "$MG/st/ladder_saved" ] && echo "PASS ladder: saved value cleared after restore" || { echo "FAIL ladder: saved value kept"; fail=1; }
 SAVED="123000 100000"
-lt "restore writes back the SAVED value, not max"     5    2   "0 0 0 4" 1 "400000 100000" "123000 100000" ""
+lt "restore writes back the SAVED value, not max"     5    2   "4" 1 "400000 100000" "123000 100000" ""
 SAVED="$M"
-lt "a calm tick resets on a high one"                 20   2   "0 5 0 3" 2 "400000 100000" "400000 100000" ""
-lt "L1 calm x5: L0 unparks again"                     3    1   "0 0 0 4" 0 "$M" "$M" "4 5 6"
-lt "reboot reset the cgroup at L2: re-written"        16   2   "0 5 0 0" 2 "$M" "400000 100000" ""
+lt "a calm tick resets on a high one"                 20   2   "3 16 16 16 16 16" 2 "400000 100000" "400000 100000" ""
+lt "L1 calm x5: L0 unparks again"                     3    1   "4" 0 "$M" "$M" "4 5 6"
+lt "reboot reset the cgroup at L2: re-written"        16   2   "0 16 16 16 16 16" 2 "$M" "400000 100000" ""
 CPU3="100000 100000"
-lt "floor: an L3 value below 2 CPUs is raised to 2"   30   2   "9 9 9 0" 3 "400000 100000" "200000 100000" ""
+lt "floor: an L3 value below 2 CPUs is raised to 2"   30   2   "0 $V9" 3 "400000 100000" "200000 100000" ""
 CPU3=""
+# N of the last N+LADDER_SLACK ticks (default slack 2): one dip in a build burst does not restart the count.
+lt "L2 despite one dip: 5 of the last 7 >= 15"        16   1   "0 16 16 9 16 16" 2 "$M" "400000 100000" ""
+lt "three dips: 4 of the last 7, stays L1"            16   1   "0 9 16 9 16 9 16" 1 "$M" "$M" ""
+lt "old highs outside the window do not count"       16   1   "0 16 16 16 16 9 9 9" 1 "$M" "$M" ""
+EXTRA="LADDER_SLACK=0" lt "LADDER_SLACK=0: in a row again, a dip resets" 16 1 "0 16 16 9 16 16" 1 "$M" "$M" ""
+EXTRA=""
+lt "old 4-counter state file: no error, L0"           5    0   "0 0 0 0"  0 "$M" "$M" "4 5 6"
+# busy > 0 for L2/L3: a clamp with no CI job cannot help the wings. L1 (hold) still works.
+lt "no busy runner: L2 held back, stays L1"           16   1   "0 16 16 16 16" 1 "$M" "$M" "" none
+[ "$(cat "$MG/st/ladder_blocked" 2>/dev/null)" = "L2 held back: 0 busy runners" ] && echo "PASS ladder: the held-back reason is kept (logged once)" || { echo "FAIL ladder: ladder_blocked '$(cat "$MG/st/ladder_blocked" 2>/dev/null)'"; fail=1; }
+lt "no busy runner: L1 still entered"                 12   0   "0 12 12"  1 "$M" "$M" "" none
+lt "no busy runner at L2: no escalation to L3"        30   2   "0 $V9"    2 "400000 100000" "400000 100000" "" none
+# Post-boot hold: no escalation while uptime < LADDER_BOOT_HOLD_S (600 s); the window keeps filling.
+UPTIME=120 lt "booting: L1 held back, unparks"        12   0   "0 12 12"  0 "$M" "$M" "4 5 6"
+UPTIME=120 lt "booting: L2 held back, stays L1"       16   1   "0 16 16 16 16" 1 "$M" "$M" ""
+UPTIME=700 lt "after the hold: escalates at once"     16   1   "0 16 16 16 16" 2 "$M" "400000 100000" ""
+UPTIME=""
 # Stale or missing input: never escalate; hold the level; back to L0 after LADDER_STALE_RESTORE_S.
-STALE_FILE=1 lt "stale input at L2 + 99 %: holds L2"  99   2   "9 9 9 0" 2 "400000 100000" "400000 100000" ""
+STALE_FILE=1 lt "stale input at L2 + 99 %: holds L2"  99   2   "0 $V9" 2 "400000 100000" "400000 100000" ""
 STALE_FILE=""
-lt "missing input at L0: stays L0, unparks"           ""   0   "2 0 0 0" 0 "$M" "$M" "4 5 6"
+lt "missing input at L0: stays L0, unparks"           ""   0   "0 12 12" 0 "$M" "$M" "4 5 6"
 STALE_SINCE=300 lt "missing input 5 min at L2: holds"  ""  2   ""          2 "400000 100000" "400000 100000" ""
 STALE_SINCE=700 lt "missing input >10 min: L0, restores" "" 2  ""          0 "400000 100000" "$M" "4 5 6"
 STALE_SINCE=""
 # L3 park: only after LADDER_PARK_AFTER_S, one IDLE runner per tick, never a busy one.
-L3_SINCE=300 WANT_STOPS="" lt "L3 for 5 min: no park"   30  3  "9 9 9 0" 3 "200000 100000" "200000 100000" ""
-L3_SINCE=1000 WANT_STOPS="3" lt "L3 for 16 min: parks one idle (highest)" 30 3 "9 9 9 0" 3 "200000 100000" "200000 100000" ""
-L3_SINCE=1000 WANT_STOPS="" lt "L3: all busy: parks none" 30 3 "9 9 9 0" 3 "200000 100000" "200000 100000" "" "1 2 3"
+L3_SINCE=300 WANT_STOPS="" lt "L3 for 5 min: no park"   30  3  "0 $V9" 3 "200000 100000" "200000 100000" ""
+L3_SINCE=1000 WANT_STOPS="3" lt "L3 for 16 min: parks one idle (highest)" 30 3 "0 $V9" 3 "200000 100000" "200000 100000" ""
+L3_SINCE=1000 WANT_STOPS="" lt "L3: all busy: parks none" 30 3 "0 $V9" 3 "200000 100000" "200000 100000" "" "1 2 3"
 L3_SINCE="" WANT_STOPS=""
 # observe: levels are tracked and logged; nothing is written, held or parked.
-LADDER=observe lt "observe: L2 reached, no write, no hold" 16 1 "4 4 0 0" 2 "$M" "$M" "4 5 6"
+LADDER=observe lt "observe: L2 reached, no write, no hold" 16 1 "0 16 16 16 16" 2 "$M" "$M" "4 5 6"
 # enforce -> observe while clamped: observe restores the saved value (it used to keep the clamp until LADDER=0).
-SAVED="$M" LADDER=observe lt "observe after enforce: restores the clamp" 16 2 "4 4 0 0" 2 "400000 100000" "$M" "4 5 6"
+SAVED="$M" LADDER=observe lt "observe after enforce: restores the clamp" 16 2 "0 16 16 16 16" 2 "400000 100000" "$M" "4 5 6"
 [ ! -e "$MG/st/ladder_saved" ] && echo "PASS ladder: observe forgets the saved value" || { echo "FAIL ladder: observe kept the saved value"; fail=1; }
 SAVED=""
 SAVED=""
 # Off with leftovers: LADDER=0 restores the saved value and forgets the ladder (the rollback path).
 SAVED="$M" LADDER=0 lt "LADDER=0 with a saved value: restores" 30 3 "" 0 "200000 100000" "$M" "4 5 6"
 [ ! -e "$MG/st/ladder_level" ] && [ ! -e "$MG/st/ladder_saved" ] && echo "PASS ladder: off cleans its state" || { echo "FAIL ladder: state left"; fail=1; }
-SAVED="$M" ARG=--restore lt "--restore: cpu.max back, ladder reset" 30 3 "9 9 9 0" 0 "200000 100000" "$M" ""
+SAVED="$M" ARG=--restore lt "--restore: cpu.max back, ladder reset" 30 3 "0 $V9" 0 "200000 100000" "$M" ""
 SAVED="" ARG="" LADDER=""
 # From an EMPTY state (first deploy): ticks must accumulate across runs. 3 ticks at 12 % -> L1, then 5 at 16 % -> L2.
 MG=$(mktemp -d -p "$tmp"); export MG; : > "$MG/calls"; echo "2.0 1 1 1/1 1" > "$MG/loadavg"; mkdir -p "$MG/st" "$MG/cg"; echo "max 100000" > "$MG/cg/cpu.max"
-printf 'RUNNER_PREFIX=runner-\nPOOL_SIZE=10\nCAP=6\nLAUNCH_CMD=%s\nSTATE=%s/st\nLOADAVG=%s/loadavg\nMODE=enforce\nLADDER=enforce\nLADDER_PSI_FILE=%s/wing\nLADDER_CGROUP=%s/cg\n' "$tmp/launch.sh" "$MG" "$MG" "$MG" "$MG" > "$MG/conf"
+printf 'RUNNER_PREFIX=runner-\nPOOL_SIZE=10\nCAP=6\nLAUNCH_CMD=%s\nSTATE=%s/st\nLOADAVG=%s/loadavg\nMODE=enforce\nLADDER=enforce\nLADDER_PSI_FILE=%s/wing\nLADDER_CGROUP=%s/cg\nLADDER_UPTIME_FILE=%s/uptime\n' "$tmp/launch.sh" "$MG" "$MG" "$MG" "$MG" "$MG" > "$MG/conf"; echo "99999.00 1.00" > "$MG/uptime"
 seq_out=""; errs=0
 for p in 12 12 12 16 16 16 16 16; do echo "some avg10=$p" > "$MG/wing"
   RUNNING="1 2 3" BUSY="1" OTHER="" MARI_GATE_CONF="$MG/conf" PATH="$tmp/bin:$PATH" bash "$here/mari-gate.sh" >/dev/null 2>>"$MG/err"
