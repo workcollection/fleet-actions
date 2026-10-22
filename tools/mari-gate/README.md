@@ -42,10 +42,13 @@ wing-psi.sh 110 114 115 116 > /tmp/w && pct push 113 /tmp/w /run/mari-gate/wing-
 
 | Level | Entered at (`LADDER_PSI_FILE` "some avg10") | Action |
 |---|---|---|
-| L1 | ≥ `LADDER_T1` (10) % for `LADDER_N1` (3) ticks | hold: no unpark. Running jobs continue |
-| L2 | ≥ `LADDER_T2` (15) % for `LADDER_N2` (5) ticks | `LADDER_CGROUP/cpu.max` = `LADDER_CPU2` (4 CPUs) |
-| L3 | ≥ `LADDER_T3` (25) % for `LADDER_N3` (10) ticks | `cpu.max` = `LADDER_CPU3` (2 CPUs); after `LADDER_PARK_AFTER_S` (900 s), park one **idle** runner per tick |
+| L1 | ≥ `LADDER_T1` (10) % on `LADDER_N1` (3) of the last 5 ticks | hold: no unpark. Running jobs continue |
+| L2 | ≥ `LADDER_T2` (15) % on `LADDER_N2` (5) of the last 7 ticks, with a busy runner | `LADDER_CGROUP/cpu.max` = `LADDER_CPU2` (4 CPUs) |
+| L3 | ≥ `LADDER_T3` (25) % on `LADDER_N3` (10) of the last 12 ticks, with a busy runner | `cpu.max` = `LADDER_CPU3` (2 CPUs); after `LADDER_PARK_AFTER_S` (900 s), park one **idle** runner per tick |
 
+- **N of the last N+2 ticks.** A level is entered when `LADDER_Nk` of the last `LADDER_Nk`+`LADDER_SLACK` (2) ticks were at or above its threshold. The wing avg10 swings during build bursts; with "N in a row", one dip restarted the count and a 45-minute burst reached only L1. `LADDER_SLACK=0` gives "N in a row" again.
+- **No clamp without CI.** L2 and L3 need at least `LADDER_MIN_BUSY` (1) busy runner: with no CI job, a clamp cannot help the wings. L1 (hold) does not need one.
+- **Boot hold.** No escalation while uptime is below `LADDER_BOOT_HOLD_S` (600 s). Guests starting after a host reboot raise the wing pressure, not CI (2026-10-19: L2 at 44 % with CI idle). A held-back escalation is logged once per reason.
 - **One level per tick, both ways.** It steps down after `LADDER_CALM` (5) ticks below the current level's threshold.
 - **The clamp goes on the cgroup that holds dockerd and every container** (inside an LXC container: its own `/sys/fs/cgroup/system.slice`, writable from inside). So image builds are covered whichever way BuildKit runs: inside dockerd (the default `docker` driver) or as `buildx_buildkit_*` containers (the `docker-container` driver, used by `docker/setup-buildx-action`). Containers a job starts are covered too. A per-runner `--cpus` limit covers none of these: they are siblings of the runner container, not its children.
 - **Floor of 2 CPUs.** A configured value below it is raised. Measured at 2 CPUs with a CPU burner saturating the clamp for 10 min: `docker ps`/`docker exec` latency unchanged (~300 ms), and no listener errors in any runner log.

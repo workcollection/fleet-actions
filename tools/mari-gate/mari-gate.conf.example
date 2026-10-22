@@ -21,8 +21,11 @@ LADDER=0                       # throttle ladder: 0 = off, observe = log levels 
 LADDER_PSI_FILE=/run/mari-gate/wing-cpu-pressure   # 'some avg10=<max>' of the tenants to protect (wing-psi.sh on the host)
 LADDER_CGROUP=/sys/fs/cgroup/system.slice          # holds dockerd, BuildKit and every container
 LADDER_T1=10; LADDER_T2=15; LADDER_T3=25           # enter L1/L2/L3 at >= these % ...
-LADDER_N1=3;  LADDER_N2=5;  LADDER_N3=10           # ... for this many ticks in a row
+LADDER_N1=3;  LADDER_N2=5;  LADDER_N3=10           # ... on this many of the last N+LADDER_SLACK ticks
+LADDER_SLACK=2                 # allowed dips per window (0 = N ticks in a row)
 LADDER_CALM=5                  # step down one level after this many ticks below the level's threshold
+LADDER_BOOT_HOLD_S=600         # no escalation while uptime is below this (guests booting, not CI)
+LADDER_MIN_BUSY=1              # no escalation into L2/L3 with fewer busy runners than this (0 = off)
 LADDER_CPU2="400000 100000"    # cpu.max at L2 (4 CPUs)
 LADDER_CPU3="200000 100000"    # cpu.max at L3 (2 CPUs; never below 2)
 LADDER_STALE_S=90              # input older than this never escalates (the level holds)
