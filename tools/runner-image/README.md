@@ -2,6 +2,8 @@
 
 `Dockerfile` = the digest-pinned `myoung34/github-runner` base plus **osslsigncode 2.14**, built from the sha256-pinned tag archive in a builder stage. The final stage asserts the exact version. The image carries **no signing identity**: a signing runner mounts that read-only at run time.
 
+**Node (Node2Shell, CVE-2026-111497):** the base's apt `nodejs` 18 is purged and the sha256-pinned official node tarball (`NODE_VERSION`) goes to `/usr/local`. `externals/node20` is a symlink to `externals/node24`, because no fixed 20.x exists. The build asserts node, both externals and the runner version. To bump: change `BASE`, `RUNNER_VERSION`, `NODE_VERSION` and `NODE_SHA256` together.
+
 | Pool | Build | Run |
 |---|---|---|
 | Long-lived org pool (`run-runners.sh`) | `docker build -t fleet-runner:noble-oss214 tools/runner-image` | set the launcher's image to `fleet-runner:noble-oss214`, then recreate the runners |
@@ -17,7 +19,7 @@ Recreating every runner aborts the jobs running on them. So:
 1. Choose a calm slot.
 2. Stop any gate that recreates runners, for example `mari-gate.timer`.
 3. Recreate the runners.
-4. Check `osslsigncode --version` inside each runner.
+4. Check `osslsigncode --version`, `node --version`, `externals/node24/bin/node --version` and `bin/Runner.Listener --version` inside each runner.
 5. Restart the gate.
 
 ## Native (non-docker) runners: dpkg-divert
