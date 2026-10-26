@@ -165,7 +165,7 @@ jobs:
     # rejected). Guard the go-only steps at STEP level instead, where the workspace exists.
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: workcollection/fleet-actions/.github/actions/setup-go@4eec42969c64740823618a9b47b8e29e16efa690 # self-ref: main after #6, composites unchanged by the release commit
+      - uses: workcollection/fleet-actions/.github/actions/setup-go@bfd29c842d13956a0c03bd7a1dad6cbc6bf73d2d # self-ref: main after #6, composites unchanged by the release commit
         if: hashFiles('**/go.mod') != ''
       - name: Install + run govulncheck & gosec
         if: hashFiles('**/go.mod') != ''
