@@ -127,7 +127,7 @@ jobs:
     runs-on: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || inputs.runs-on }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: workcollection/fleet-actions/.github/actions/setup-python@4eec42969c64740823618a9b47b8e29e16efa690 # self-ref: main after #6, composites unchanged by the release commit
+      - uses: workcollection/fleet-actions/.github/actions/setup-python@c68400a880dd8c472493895659744d350780b26a # self-ref: main after #6, composites unchanged by the release commit
       - name: Install + run Semgrep
         id: scan
         continue-on-error: true
