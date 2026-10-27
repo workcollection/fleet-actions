@@ -1,0 +1,7 @@
+[Unit]
+Description=n4 CI gate shadow log: current vs new start decision per pool (logs only)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /usr/local/lib/n4-ci-gate/n4-gate-shadow.py tick
+Nice=10
