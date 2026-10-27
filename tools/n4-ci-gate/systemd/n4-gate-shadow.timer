@@ -1,0 +1,10 @@
+[Unit]
+Description=n4 CI gate shadow log, every minute
+
+[Timer]
+OnCalendar=minutely
+AccuracySec=5s
+Persistent=false
+
+[Install]
+WantedBy=timers.target
