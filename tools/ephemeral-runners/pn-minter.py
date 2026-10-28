@@ -291,7 +291,10 @@ def main():
             stale[j["repo"]] = (n + 1, max(oldest, age_min(j["created"])))
     # Gate-open history over the alert window: (time, slot free and load below LOAD_MAX).
     now = time.time()
-    gate_open = len(live) < status["max_jobs"] and status["load1"] < float(c["LOAD_MAX"])
+    # the agent reports its own gate decision (psi or load, n4-ci-gate) since 2026-10-28; older agents: the load rule
+    gate = status.get("gate") or {}
+    gate_open = len(live) < status["max_jobs"] and (gate["allow"] if "allow" in gate
+                                                    else status["load1"] < float(c["LOAD_MAX"]))
     hist = [h for h in state.get("gate_hist", []) if now - h[0] <= int(c["ALERT_MIN"]) * 60]
     hist.append([now, gate_open])
     state["gate_hist"] = hist

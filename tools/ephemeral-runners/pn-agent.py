@@ -43,6 +43,11 @@ DEFAULTS = {
     "JOB_TIMEOUT_MIN": "60",
     "IDLE_MAX_MIN": "15",
     "LOAD_MAX": "8",
+    # Start gate: "load" = load1 <= LOAD_MAX (the 2026-09-30 guardrail); "psi" = the shared n4 rule
+    # (tools/n4-ci-gate/gate_policy.py: package temp < 85 C AND CPU PSI some avg60 < 40 %, or this pool idle and PSI < 70 %).
+    # Operator OK 2026-10-27 ('N4 gate ok'). Rollback: GATE_POLICY=load.
+    "GATE_POLICY": "load",
+    "GATE_POLICY_DIR": "/usr/local/lib/n4-ci-gate",
     "TOKEN_DIR": "/run/pn-runner",
     "TOKEN_FILE_MAX_S": "120",
     # Extra `docker run` arguments, shell-quoted, e.g. a signing identity:
@@ -140,6 +145,24 @@ def registered(name):
     return "Listening for Jobs" in out or "Running job:" in out
 
 
+def start_gate(c, running):
+    """(allow, why) for one more runner. GATE_POLICY=psi asks the shared n4 rule; if that module cannot be loaded or
+    fails, the load rule decides and the log says so (never a silent open gate)."""
+    if c.get("GATE_POLICY", "load") == "psi":
+        try:
+            if c["GATE_POLICY_DIR"] not in sys.path:
+                sys.path.insert(0, c["GATE_POLICY_DIR"])
+            import gate_policy as G
+            gc = G.conf()
+            ok, why = G.decide(running, G.read_psi(gc), G.read_temp(gc), gc)
+            return ok, f"psi gate: {why}"
+        except Exception as e:  # noqa: BLE001
+            log(f"gate policy unavailable ({type(e).__name__}: {e}); falling back to the load rule")
+    ld = load1()
+    return (ld <= float(c["LOAD_MAX"]),
+            f"load {ld:.2f} {'<=' if ld <= float(c['LOAD_MAX']) else '>'} {c['LOAD_MAX']}")
+
+
 def load1():
     return float(open("/proc/loadavg").read().split()[0])
 
@@ -197,8 +220,9 @@ def cmd_start(c):
     if len(live) >= int(c["MAX_JOBS"]):
         log(f"start {repo}: cap reached ({len(live)}/{c['MAX_JOBS']})")
         return 10
-    if load1() > float(c["LOAD_MAX"]):
-        log(f"start {repo}: load {load1():.2f} > {c['LOAD_MAX']}, skipping")
+    allow, why = start_gate(c, len(live))
+    if not allow:
+        log(f"start {repo}: {why}, skipping")
         return 11
     if disk_free_gb() < float(c["DISK_FREE_MIN_GB"]):
         log(f"start {repo}: disk free {disk_free_gb():.0f} GB < {c['DISK_FREE_MIN_GB']} GB")
@@ -286,8 +310,11 @@ def cmd_status(c):
     for r in rows:
         r["age_min"] = round((now - r["started"]) / 60, 1)
         r["job"] = r["state"] == "running" and running_job(r["name"])
+    live = [r for r in rows if r.get("state") in ("running", "created", "restarting")]
+    allow, why = start_gate(c, len(live))
     print(json.dumps({"load1": load1(), "disk_free_gb": round(disk_free_gb(), 1),
-                      "max_jobs": int(c["MAX_JOBS"]), "containers": rows}))
+                      "max_jobs": int(c["MAX_JOBS"]), "containers": rows,
+                      "gate": {"policy": c.get("GATE_POLICY", "load"), "allow": allow, "why": why}}))
     return 0
 
 
