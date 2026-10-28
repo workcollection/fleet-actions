@@ -1,0 +1,7 @@
+[Unit]
+Description=runner-pve IO gate shadow log: what a hold-only IO gate would do per runner (logs only)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /usr/local/lib/n4-ci-gate/pve-runner-shadow.py tick
+Nice=10

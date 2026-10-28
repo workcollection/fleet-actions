@@ -39,5 +39,33 @@ s = S.summary(24, L)
 check("summary counts current vs new allow/refuse and the maxima",
       s["ticks"] == 4 and s["pn"]["current_allow"] == 1 and s["pn"]["new_allow"] == 3 and s["pn"]["differ"] == 2
       and s["max_psi_avg60"] == 80.0 and s["max_temp_c"] == 63, s)
+# pve IO term (orchestrator m-8628): off by default, so the n4 rule above is unchanged
+check("IO term off by default: n4 decisions ignore io", G.decide(1, 20.0, 60.0, io=90.0)[0])
+P = dict(G.DEFAULTS, TEMP_FILE="", IO_FULL_MAX="20", MIN_RUNNER="0")
+check("pve: io full above the limit shuts the gate", not G.decide(0, 5.0, None, P, io=47.0)[0]
+      and "io pressure" in G.decide(0, 5.0, None, P, io=47.0)[1])
+check("pve: low io and cpu opens it without a temperature input", G.decide(0, 5.0, None, P, io=3.7)[0])
+check("pve: missing io input refuses", not G.decide(0, 5.0, None, P, io=None)[0])
+check("pve: no guaranteed minimum (idle pool at 45 % cpu waits)", not G.decide(0, 45.0, None, P, io=1.0)[0])
+check("live /proc inputs are never stale", G._fresh("/proc/loadavg", 1))
+open(os.path.join(T, "io"), "w").write("some avg10=7.75 avg60=6.95 avg300=36.05 total=1\nfull avg10=5.21 avg60=3.70 avg300=21.30 total=1\n")
+check("reads io full avg60", G.read_io_full(dict(P, IO_PSI_FILE=os.path.join(T, "io"))) == 3.70)
+spec2 = importlib.util.spec_from_file_location("pveshadow", os.path.join(os.path.dirname(os.path.abspath(__file__)), "pve-runner-shadow.py"))
+V = importlib.util.module_from_spec(spec2); spec2.loader.exec_module(V)
+rs = [{"unit": "r1", "state": "active", "busy": True}, {"unit": "r2", "state": "active", "busy": False},
+      {"unit": "r3", "state": "failed", "busy": False}]
+shut, opn = [x["new"] for x in V.plan(rs, False)], [x["new"] for x in V.plan(rs, True)]
+check("hold-only: shut keeps the busy runner, parks the idle one, starts nothing", shut == ["keep", "park", "keep"], shut)
+check("hold-only: open starts the stopped runner", opn == ["keep", "keep", "start"], opn)
+L2 = os.path.join(T, "pve.jsonl")
+with open(L2, "w") as fh:
+    fh.write(json.dumps({"ts": now, "io_full_avg60": 47.0, "io_some_avg60": 80.0, "cpu_some_avg60": 10.0, "load1": 9,
+                         "allow": False, "why": "io", "runners": V.plan(rs, False)}) + "\n")
+    fh.write(json.dumps({"ts": now - 60, "io_full_avg60": 3.0, "io_some_avg60": 6.0, "cpu_some_avg60": 5.0, "load1": 2,
+                         "allow": True, "why": "ok", "runners": None}) + "\n")
+v = V.summary(24, L2)
+check("pve summary: shut ticks, would-park, busy held, unreadable CT, maxima",
+      v["ticks"] == 2 and v["gate_shut"] == 1 and v["ct_unreadable"] == 1 and v["runners"]["r2"]["would_park"] == 1
+      and v["runners"]["r1"]["held_busy_while_shut"] == 1 and v["max_io_full_avg60"] == 47.0, v)
 print("FAILED:" if fails else "all ok", ", ".join(fails))
 sys.exit(1 if fails else 0)
