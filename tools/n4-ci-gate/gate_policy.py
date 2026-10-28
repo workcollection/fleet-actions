@@ -26,6 +26,11 @@ DEFAULTS = {
     "PSI_START": "40",
     "PSI_MIN_RUNNER": "70",
     "TEMP_STOP": "85",
+    # optional terms (pve, 2026-10-28): IO_FULL_MAX = refuse when IO PSI 'full avg60' exceeds it (empty = off);
+    # TEMP_FILE empty = no thermal input on that host; MIN_RUNNER=0 = no guaranteed minimum
+    "IO_PSI_FILE": "/proc/pressure/io",
+    "IO_FULL_MAX": "",
+    "MIN_RUNNER": "1",
 }
 CONF_FILE = os.environ.get("N4_GATE_CONF", "/etc/n4-ci-gate.conf")
 
@@ -43,6 +48,8 @@ def conf(path=None):
 
 
 def _fresh(path, max_age):
+    if path.startswith("/proc/"):      # live kernel file: its mtime is boot time, never stale
+        return os.path.exists(path)
     try:
         return time.time() - os.path.getmtime(path) <= max_age
     except OSError:
@@ -68,18 +75,33 @@ def read_temp(c):
     return v / 1000 if v > 1000 else v
 
 
-def decide(pool_running, psi, temp, c=None):
+def read_io_full(c):
+    """IO PSI 'full avg60' (%) from IO_PSI_FILE (live /proc: no staleness check), or None."""
+    try:
+        m = re.search(r"^full\s+avg10=[\d.]+\s+avg60=([\d.]+)", open(c["IO_PSI_FILE"]).read(), re.M)
+    except OSError:
+        return None
+    return float(m.group(1)) if m else None
+
+
+def decide(pool_running, psi, temp, c=None, io=None):
     """(allow, reason). Pure: the inputs are passed in."""
-    c = c or DEFAULTS
-    if temp is None:
-        return False, "temperature input missing or stale"
-    if temp >= float(c["TEMP_STOP"]):
-        return False, f"thermal stop: package {temp:.0f} C >= {c['TEMP_STOP']} C"
+    c = dict(DEFAULTS, **(c or {}))
+    if c.get("TEMP_FILE"):
+        if temp is None:
+            return False, "temperature input missing or stale"
+        if temp >= float(c["TEMP_STOP"]):
+            return False, f"thermal stop: package {temp:.0f} C >= {c['TEMP_STOP']} C"
+    if c.get("IO_FULL_MAX"):
+        if io is None:
+            return False, "io pressure input missing"
+        if io > float(c["IO_FULL_MAX"]):
+            return False, f"io pressure full {io:.1f} % > {c['IO_FULL_MAX']} %"
     if psi is None:
         return False, "cpu pressure input missing or stale"
     if psi < float(c["PSI_START"]):
         return True, f"cpu pressure {psi:.1f} % < {c['PSI_START']} %"
-    if pool_running == 0 and psi < float(c["PSI_MIN_RUNNER"]):
+    if pool_running == 0 and c.get("MIN_RUNNER", "1") != "0" and psi < float(c["PSI_MIN_RUNNER"]):
         return True, f"guaranteed minimum: pool idle, cpu pressure {psi:.1f} % < {c['PSI_MIN_RUNNER']} %"
     return False, (f"cpu pressure {psi:.1f} % >= {c['PSI_START']} % and the pool already runs {pool_running}"
                    if pool_running else f"cpu pressure {psi:.1f} % >= {c['PSI_MIN_RUNNER']} % (box saturated)")

@@ -33,3 +33,18 @@ systemctl daemon-reload && systemctl enable --now n4-gate-shadow.timer
 # n4 host
 install -m 0755 host/mari-gate-hostpsi.sh /usr/local/sbin/mari-gate-hostpsi.sh
 ```
+
+## runner-pve IO gate shadow (pve host, 2026-10-28, orchestrator m-8628)
+
+runner-pve (CT103, smol-kitten) has no start gate. On 2026-10-28 its jobs read ~383 MB/s and pushed pve IO pressure to
+some 80 % / full 47 %. `pve-runner-shadow.py` logs, every minute on the pve **host**, what a **hold-only** IO gate
+would do per runner service: busy runner = keep (a job is never cut), idle runner with the gate shut = park, stopped
+runner with the gate open = start. It changes nothing.
+
+The gate is `gate_policy.decide` with the optional terms added for pve (all off by default, so n4 is unchanged):
+`IO_FULL_MAX=20` (IO PSI full avg60), `TEMP_FILE=` (no thermal input), `MIN_RUNNER=0` (no guaranteed minimum),
+`PSI_FILE=/proc/pressure/cpu`. Overrides go in `/etc/pve-runner-gate.conf` (KEY=VALUE).
+
+Install on pve (operator): copy `gate_policy.py` and `pve-runner-shadow.py` to `/usr/local/lib/n4-ci-gate/`, the two
+`systemd/pve-runner-shadow.*` units to `/etc/systemd/system/`, then `systemctl enable --now pve-runner-shadow.timer`.
+After 24 h: `python3 /usr/local/lib/n4-ci-gate/pve-runner-shadow.py summary --hours 24`.
