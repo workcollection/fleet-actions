@@ -1,0 +1,7 @@
+[Unit]
+Description=runner-LXC profile: sample CT %i cgroup counters (read-only, logs to /var/log/runner-profile)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /usr/local/lib/runner-profile/runnerprofile.py measure --ct %i
+Nice=10

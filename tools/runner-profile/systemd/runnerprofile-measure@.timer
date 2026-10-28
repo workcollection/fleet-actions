@@ -1,0 +1,10 @@
+[Unit]
+Description=runner-LXC profile: sample CT %i every minute
+
+[Timer]
+OnCalendar=minutely
+AccuracySec=5s
+Persistent=false
+
+[Install]
+WantedBy=timers.target
