@@ -4,6 +4,8 @@
 
 **Node (Node2Shell, CVE-2026-111497):** the base's apt `nodejs` 18 is purged and the sha256-pinned official node tarball (`NODE_VERSION`) goes to `/usr/local`. `externals/node20` is a symlink to `externals/node24`, because no fixed 20.x exists. The build asserts node, both externals and the runner version. To bump: change `BASE`, `RUNNER_VERSION`, `NODE_VERSION` and `NODE_SHA256` together.
 
+**Semgrep:** `SEMGREP_VERSION` (1.177.0) is installed in a venv at `/opt/semgrep`, linked to `/usr/local/bin/semgrep`. The `sast` job in `security-scan.yml` skips its per-run pip install when `semgrep --version` prints the same version, so keep the two pins equal. The pin is an ARG, not a file Dependabot reads: bump both by hand.
+
 | Pool | Build | Run |
 |---|---|---|
 | Long-lived org pool (`run-runners.sh`) | `docker build -t fleet-runner:noble-oss214 tools/runner-image` | set the launcher's image to `fleet-runner:noble-oss214`, then recreate the runners |

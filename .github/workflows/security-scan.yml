@@ -133,7 +133,13 @@ jobs:
         continue-on-error: true
         run: |
           echo '## 🔎 Semgrep (SAST)' >> "$GITHUB_STEP_SUMMARY"
-          python3 -m pip install --quiet --disable-pip-version-check 'semgrep==1.177.0' || { echo '_semgrep install failed_' >> "$GITHUB_STEP_SUMMARY"; exit 0; }
+          # The fleet runner image bakes this exact version (tools/runner-image), so the pip install
+          # (80% of an n4 core at the 2026-10-30 03:07Z load peak) only runs where it is missing.
+          if semgrep --version 2>/dev/null | grep -qx '1.177.0'; then
+            echo 'semgrep 1.177.0 preinstalled, skipping pip install'
+          else
+            python3 -m pip install --quiet --disable-pip-version-check 'semgrep==1.177.0' || { echo '_semgrep install failed_' >> "$GITHUB_STEP_SUMMARY"; exit 0; }
+          fi
           semgrep scan --config=auto --quiet --json --output=/tmp/semgrep.json . 2>/tmp/sg.log || true
           python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY" || echo '_semgrep parse failed_' >> "$GITHUB_STEP_SUMMARY"
           import json, collections, os

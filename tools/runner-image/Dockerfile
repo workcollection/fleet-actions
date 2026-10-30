@@ -11,6 +11,8 @@ ARG NODE_VERSION=24.22.1
 ARG NODE_SHA256=6c172a9ab6718f7b801fb5a7bd486af2ee5e32758086a04b84fcce2aa77095e6
 ARG OSSLSIGNCODE_VERSION=2.14
 ARG OSSLSIGNCODE_SHA256=0f033fd6069387d2e489fbd2187e62f624764eb8c2758ee94e3e793e5150b5c5
+# Keep equal to the pin in .github/workflows/security-scan.yml (sast), which skips its pip install on a match.
+ARG SEMGREP_VERSION=1.177.0
 
 FROM ${BASE} AS osslsigncode
 ARG OSSLSIGNCODE_VERSION
@@ -35,6 +37,7 @@ ARG OSSLSIGNCODE_VERSION
 ARG RUNNER_VERSION
 ARG NODE_VERSION
 ARG NODE_SHA256
+ARG SEMGREP_VERSION
 COPY --from=osslsigncode /usr/local/bin/osslsigncode /usr/local/bin/osslsigncode
 # Node2Shell (CVE-2026-111497): the base still puts apt nodejs 18.19.1 (EOL, unfixed) on PATH.
 # Purge it and install the sha256-pinned official tarball into /usr/local instead.
@@ -56,6 +59,14 @@ RUN cd /actions-runner/externals \
  && node20/bin/node --version | grep -qx "v${NODE_VERSION}" \
  && node24/bin/node --version | grep -qx "v${NODE_VERSION}" \
  && /actions-runner/bin/Runner.Listener --version | grep -qx "${RUNNER_VERSION}"
-RUN command -v curl jq openssl osslsigncode \
+# semgrep in its own venv (not the system or setup-python interpreter), linked onto PATH.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends python3-venv \
+ && rm -rf /var/lib/apt/lists/* \
+ && python3 -m venv /opt/semgrep \
+ && /opt/semgrep/bin/pip install --no-cache-dir --disable-pip-version-check "semgrep==${SEMGREP_VERSION}" \
+ && ln -sf /opt/semgrep/bin/semgrep /usr/local/bin/semgrep \
+ && semgrep --version 2>/dev/null | grep -qx "${SEMGREP_VERSION}"
+RUN command -v curl jq openssl osslsigncode semgrep \
  && osslsigncode --version | grep -q "osslsigncode ${OSSLSIGNCODE_VERSION}," \
  && osslsigncode --version | head -1
