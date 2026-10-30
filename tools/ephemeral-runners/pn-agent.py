@@ -25,6 +25,7 @@ import re
 import secrets
 import shlex
 import shutil
+import socket
 import subprocess
 import sys
 import time
@@ -56,6 +57,12 @@ DEFAULTS = {
     # 1 = register with only LABELS (no self-hosted/Linux/X64 defaults), so a job
     # that asks for e.g. [self-hosted, linux] can never land on this runner.
     "NO_DEFAULT_LABELS": "",
+    # Runner router phase 0 (repo.catboy.systems docs/plans/runner-router.md; operator OK q-3417): `status` also
+    # reports a `capacity` block. Report only: nothing here changes what `start` does.
+    "HOST_NAME": "",           # name in the router's host registry; empty = the hostname
+    "DRAIN": "",               # 1 = advertise 0 free slots (running jobs finish)
+    "MEM_RESERVE_GB": "2",     # kept free for the host itself when counting memory slots
+    "BACKUP_WINDOW": "",       # local "HH:MM-HH:MM" (vzdump); inside it the host advertises 0 free slots
 }
 PREFIX = "pn-"
 LABEL = "pn.managed"
@@ -304,6 +311,54 @@ def cmd_reap(c):
     return 0
 
 
+def docker_mem_gb(s):
+    """docker --memory value ('3g', '512m', '3072M', bytes) -> GiB."""
+    m = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*([bkmg]?)\s*", s.lower())
+    if not m:
+        raise ValueError(f"MEMORY {s!r} is not a docker memory size")
+    return float(m.group(1)) * {"": 1, "b": 1, "k": 2**10, "m": 2**20, "g": 2**30}[m.group(2)] / 2**30
+
+
+def mem_available_gb():
+    for line in open("/proc/meminfo"):
+        if line.startswith("MemAvailable:"):
+            return int(line.split()[1]) / 1024 / 1024
+    raise ValueError("MemAvailable missing from /proc/meminfo")
+
+
+def in_window(spec, now=None):
+    """True if the local time is inside "HH:MM-HH:MM" (may wrap midnight). Empty spec = never."""
+    if not spec.strip():
+        return False
+    a, b = (int(h) * 60 + int(m) for h, m in (x.strip().split(":") for x in spec.split("-")))
+    t = time.localtime(now)
+    cur = t.tm_hour * 60 + t.tm_min
+    return a <= cur < b if a <= b else (cur >= a or cur < b)
+
+
+def capacity(c, live, allow, why):
+    """What this host could take now, for the runner router. Slots are the smallest of the free job slots and the
+    memory slots, and 0 when draining, inside the backup window, short of disk, or when the start gate is shut."""
+    job_mem = docker_mem_gb(c["MEMORY"])
+    mem = mem_available_gb()
+    mem_slots = max(0, int((mem - float(c["MEM_RESERVE_GB"])) // job_mem)) if job_mem > 0 else 0
+    free_jobs = max(0, int(c["MAX_JOBS"]) - live)
+    stops = []
+    if c.get("DRAIN", "").strip() in ("1", "true", "yes"):
+        stops.append("drain")
+    if in_window(c.get("BACKUP_WINDOW", "")):
+        stops.append(f"backup window {c['BACKUP_WINDOW']}")
+    if disk_free_gb() < float(c["DISK_FREE_MIN_GB"]):
+        stops.append(f"disk free < {c['DISK_FREE_MIN_GB']} GB")
+    if not allow:
+        stops.append(why)
+    labels = [x.strip() for x in c["LABELS"].split(",") if x.strip()]
+    return {"host": c.get("HOST_NAME") or socket.gethostname(), "labels": labels, "ncpu": os.cpu_count(),
+            "mem_avail_gb": round(mem, 1), "job_mem_gb": round(job_mem, 2), "mem_slots": mem_slots,
+            "free_jobs": free_jobs, "slots_free": 0 if stops else min(free_jobs, mem_slots),
+            "admit": 0 if stops or not min(free_jobs, mem_slots) else 1, "stops": stops}
+
+
 def cmd_status(c):
     now = time.time()
     rows = managed()
@@ -312,9 +367,14 @@ def cmd_status(c):
         r["job"] = r["state"] == "running" and running_job(r["name"])
     live = [r for r in rows if r.get("state") in ("running", "created", "restarting")]
     allow, why = start_gate(c, len(live))
+    try:
+        cap = capacity(c, len(live), allow, why)
+    except Exception as e:  # noqa: BLE001  the capacity report must never break `status` for pn-minter
+        cap = {"error": f"{type(e).__name__}: {e}", "slots_free": 0}
     print(json.dumps({"load1": load1(), "disk_free_gb": round(disk_free_gb(), 1),
                       "max_jobs": int(c["MAX_JOBS"]), "containers": rows,
-                      "gate": {"policy": c.get("GATE_POLICY", "load"), "allow": allow, "why": why}}))
+                      "gate": {"policy": c.get("GATE_POLICY", "load"), "allow": allow, "why": why},
+                      "capacity": cap}))
     return 0
 
 

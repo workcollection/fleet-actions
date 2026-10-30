@@ -14,3 +14,8 @@ LOAD_MAX=8
 # Start gate: load (load1 <= LOAD_MAX) or psi (the shared n4 rule, tools/n4-ci-gate). Rollback: GATE_POLICY=load.
 GATE_POLICY=load
 # GATE_POLICY_DIR=/usr/local/lib/n4-ci-gate
+# Runner router phase 0: `status` reports a capacity block (report only, `start` is unchanged).
+# HOST_NAME=n4
+# DRAIN=
+# MEM_RESERVE_GB=2
+# BACKUP_WINDOW=12:30-13:30

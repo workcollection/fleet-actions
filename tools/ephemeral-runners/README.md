@@ -28,6 +28,16 @@ The account token never reaches the docker host. The docker host only sees regis
 | Jobs that need a docker daemon are skipped | minter `EXCLUDE_WORKFLOWS` | per site |
 | Page only on a true stall: jobs over `ALERT_MIN` while the gate (free slot and load below `LOAD_MAX`) was open for `STALL_SHARE` of that time | minter | 30 min, 8, 0.5 |
 
+## Capacity report (runner router, phase 0)
+
+`pn-agent status` also returns a `capacity` block for a future multi-host runner router (plan:
+smol-kitten/repo.catboy.systems `docs/plans/runner-router.md`). It is a report only: `start` behaves exactly as before.
+
+`slots_free = min(MAX_JOBS - running, floor((MemAvailable - MEM_RESERVE_GB) / MEMORY))`. It is 0 when any `stops`
+entry applies: `DRAIN=1`, local time inside `BACKUP_WINDOW` (`HH:MM-HH:MM`), free disk below `DISK_FREE_MIN_GB`, or
+a shut start gate (its reason is kept). `admit` is 1 when a slot is free: the router admits one job per host per tick.
+If an input cannot be read, the block is `{"error": ..., "slots_free": 0}` and the rest of `status` is unchanged.
+
 ## How the registration token travels
 
 1. The minter calls `POST /repos/{owner}/{repo}/actions/runners/registration-token`.

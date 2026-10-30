@@ -59,6 +59,8 @@ jobs:
         run: python3 tools/ephemeral-runners/test_minter_labels.py
       - name: pn-agent start gate (load / psi / fallback)
         run: python3 tools/ephemeral-runners/test_agent_gate.py
+      - name: pn-agent status capacity block (runner router phase 0)
+        run: python3 tools/ephemeral-runners/test_agent_capacity.py
       - name: n4-ci-gate policy + shadow summary
         run: python3 tools/n4-ci-gate/test_gate_policy.py
       - name: runner-profile sizing rules (fake cgroup tree)
