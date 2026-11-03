@@ -12,3 +12,11 @@ ALERT_REPEAT_MIN=60
 # Called with the alert text as its last argument. Empty = log only.
 NOTIFY_CMD=
 STATE=/var/lib/pn-minter/state.json
+# Runner router phase 1a (see README). Opt-in host registry; empty = AGENT_CMD above.
+HOSTS_FILE=
+# Owners whose queue this token cannot see, logged as "not visible" (comma list).
+NOT_VISIBLE=
+# Tick log / heartbeat: empty = next to STATE, "-" = off.
+TICK_LOG=
+HEARTBEAT=
+API_BUDGET_H=600

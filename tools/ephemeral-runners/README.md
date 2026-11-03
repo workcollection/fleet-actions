@@ -38,6 +38,37 @@ entry applies: `DRAIN=1`, local time inside `BACKUP_WINDOW` (`HH:MM-HH:MM`), fre
 a shut start gate (its reason is kept). `admit` is 1 when a slot is free: the router admits one job per host per tick.
 If an input cannot be read, the block is `{"error": ..., "slots_free": 0}` and the rest of `status` is unchanged.
 
+## Host registry, tick log, API budget (runner router, phase 1a)
+
+Plan: smol-kitten/repo.catboy.systems `docs/plans/runner-router-phase1.md` §3.
+
+- **Registry.** `HOSTS_FILE=/etc/pn-runner/hosts.conf` in the minter conf, one line per host:
+  `name=n4 cmd="ssh -o BatchMode=yes … pn-agent" weight=1.0 drain=0`. Without `HOSTS_FILE` (the default), or when
+  the file does not exist, the minter uses `AGENT_CMD` exactly as before. A file that exists but does not parse
+  pages and starts nothing: it never falls back silently. Phase 1a starts runners on the **first** line only.
+  Further lines get their `status` polled and appear in the shadow placement. The setting is per instance, so the
+  signing pool never reads the general pool's hosts.
+- **Tick log.** Every timer tick appends one JSON line: each host's `capacity` (`unreachable` when its status
+  fails), the queue (`eligible` / `need` / `skipped`), the shadow `placement` (highest `weight` with a free slot,
+  ties to the fewest running), what was `started`, the API budget, and `NOT_VISIBLE` owners as `"not visible"`.
+  The file sits next to `STATE` (`state.json` → `state.ticks.jsonl`) and rotates once to `.1` above
+  `TICK_LOG_MAX_MB` (10). `--check` and `--dry-run` write nothing.
+- **Heartbeat.** `state.heartbeat.json` is replaced on every tick, including ticks held back by the budget, for the
+  "router not ticking" watch. A tick that crashes writes none.
+- **API budget** (plan §6a). The minter counts its billable calls (a `304` on a conditional request is free) and
+  reads `X-RateLimit-Remaining` of the shared token from every response:
+
+  | Step | When | Effect |
+  |---|---|---|
+  | `over` | own billable calls in the last hour ≥ `API_BUDGET_H` (600; 0 = no own cap) | no GitHub call this tick |
+  | `slow` | remaining < 1500 | a full tick at most every `SLOW_TICK_S` (300 s) |
+  | `lean` | remaining < 500 | as `slow`, plus no sweep and no repo-list refresh |
+  | `pause` | remaining < 200 | no GitHub call until the reset time |
+
+  A step change is logged once. A step other than `ok` pages once per `ALERT_REPEAT_MIN`.
+
+`test_minter_router.py` covers the registry, the placement, the budget steps, the log and one full tick.
+
 ## How the registration token travels
 
 1. The minter calls `POST /repos/{owner}/{repo}/actions/runners/registration-token`.

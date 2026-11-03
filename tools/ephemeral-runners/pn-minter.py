@@ -10,7 +10,10 @@ It runs where the GitHub token lives (env GH_TOKEN). On every tick it:
   4. every SWEEP_S, deletes offline pn-* registrations that no container
      backs (a runner killed before it took a job never deregisters itself);
   5. pages through notify when an eligible job has been queued longer than
-     ALERT_MIN, or when the agent cannot be reached.
+     ALERT_MIN, or when the agent cannot be reached;
+  6. writes one JSON line per tick (each host's capacity, the queue, the
+     placement a multi-host router would choose, what it started, the API
+     budget) and a heartbeat file (runner router phase 1a).
 
 The GitHub token never leaves this process. The docker host only ever sees
 single-repository registration tokens.
@@ -60,6 +63,25 @@ DEFAULTS = {
     "SWEEP_S": "300",
     "STATE": "/var/lib/pn-minter/state.json",
     "NOTIFY_CMD": "",
+    # Runner router phase 1a (smol-kitten/repo.catboy.systems docs/plans/runner-router-phase1.md §3).
+    # HOSTS_FILE: one line per host, `name=n4 cmd="ssh … pn-agent" weight=1.0 drain=0`. Empty or
+    # absent file = one host, AGENT_CMD, as before. Opt-in per instance, so a second pool (signing)
+    # never reads the general pool's hosts. Runners start on the FIRST line only; further lines get
+    # their status polled and a shadow placement logged.
+    "HOSTS_FILE": "",
+    # Per-tick JSON log and heartbeat. Empty = next to STATE (state.json -> state.ticks.jsonl,
+    # state.heartbeat.json), so two instances never share a file. "-" = off.
+    "TICK_LOG": "",
+    "TICK_LOG_MAX_MB": "10",
+    "HEARTBEAT": "",
+    # Owners whose queue this token cannot see; logged as "not visible", never as an empty queue.
+    "NOT_VISIBLE": "",
+    # Own count of billable (non-304) API calls in the last hour; at this many the tick skips
+    # GitHub until older calls age out. 0 = no own cap (the X-RateLimit-Remaining backoff stays on).
+    "API_BUDGET_H": "600",
+    # Below 1500 / 500 remaining (shared token): run a full tick at most every SLOW_TICK_S;
+    # below 500 also no sweep and no repo-list refresh; below 200 pause until the reset.
+    "SLOW_TICK_S": "300",
 }
 API = "https://api.github.com"
 
@@ -83,6 +105,16 @@ class GitHub:
     def __init__(self, token, state):
         self.token = token
         self.etags = state.setdefault("etags", {})
+        # API budget: times of billable calls (a 304 on a conditional request is free), and the
+        # shared token's X-RateLimit-Remaining/Reset as of the last response.
+        self.api = state.setdefault("api", {"calls": [], "remaining": None, "reset": 0})
+
+    def _note(self, headers, billable):
+        if billable:
+            self.api["calls"].append(int(time.time()))
+        if headers is not None and headers.get("X-RateLimit-Remaining") is not None:
+            self.api["remaining"] = int(headers["X-RateLimit-Remaining"])
+            self.api["reset"] = int(headers.get("X-RateLimit-Reset") or 0)
 
     def call(self, method, path, cache=False):
         req = urllib.request.Request(API + path, method=method)
@@ -94,12 +126,14 @@ class GitHub:
             req.add_header("If-None-Match", cached["etag"])
         try:
             with urllib.request.urlopen(req, timeout=30) as r:
+                self._note(r.headers, True)
                 body = r.read()
                 data = json.loads(body) if body else None
                 if cache and r.headers.get("ETag"):
                     self.etags[path] = {"etag": r.headers["ETag"], "data": data}
                 return data
         except urllib.error.HTTPError as e:
+            self._note(e.headers, e.code != 304)
             if e.code == 304 and cached:
                 return cached["data"]
             raise
@@ -120,16 +154,113 @@ def save_state(path, state):
     os.replace(tmp, path)
 
 
-def agent(c, sub, stdin=None):
-    cmd = shlex.split(c["AGENT_CMD"]) + [sub]
+def agent(c, sub, stdin=None, cmd=None):
+    cmd = shlex.split(cmd or c["AGENT_CMD"]) + [sub]
     return subprocess.run(cmd, input=stdin, capture_output=True, text=True, timeout=120)
 
 
-def repos(c, gh, state):
+def hosts(c):
+    """The host registry. No HOSTS_FILE (or no such file): one host, AGENT_CMD, exactly as before.
+    A file that exists but does not parse raises: it must not fall back silently."""
+    path = c["HOSTS_FILE"]
+    if not path or not os.path.exists(path):
+        return [{"name": "default", "cmd": c["AGENT_CMD"], "weight": 1.0, "drain": False}]
+    out = []
+    for n, line in enumerate(open(path), 1):
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        kv = dict(x.split("=", 1) for x in shlex.split(line) if "=" in x)
+        if not kv.get("name") or not kv.get("cmd"):
+            raise ValueError(f"{path}:{n}: a host line needs name= and cmd=")
+        if kv["name"] in {h["name"] for h in out}:
+            raise ValueError(f"{path}:{n}: host {kv['name']} is listed twice")
+        out.append({"name": kv["name"], "cmd": kv["cmd"], "weight": float(kv.get("weight", "1")),
+                    "drain": kv.get("drain", "0") == "1"})
+    if not out:
+        raise ValueError(f"{path}: no host lines")
+    return out
+
+
+def host_view(h, status):
+    """One host's line in the tick log, from its `pn-agent status` (None = unreachable)."""
+    if status is None:
+        return {"name": h["name"], "state": "unreachable", "slots_free": 0}
+    cap = status.get("capacity")
+    running = sum(1 for x in status.get("containers", []) if x.get("state") == "running")
+    slots = 0 if h["drain"] or not isinstance(cap, dict) else int(cap.get("slots_free", 0))
+    return {"name": h["name"], "state": "drain" if h["drain"] else "ok", "running": running,
+            "max_jobs": status.get("max_jobs"), "slots_free": slots, "capacity": cap,
+            "gate": status.get("gate")}
+
+
+def place(hs, views, jobs):
+    """Shadow placement (logged, not acted on): each job, oldest first, goes to the host with a free
+    slot and the highest weight; ties go to the fewest running, then registry order."""
+    free = {v["name"]: v["slots_free"] for v in views}
+    running = {v["name"]: v.get("running", 0) for v in views}
+    out = []
+    for j in jobs:
+        cand = [h for h in hs if free[h["name"]] > 0]
+        best = max(cand, key=lambda h: (h["weight"], -running[h["name"]]), default=None)
+        if best:
+            free[best["name"]] -= 1
+            running[best["name"]] += 1
+        out.append({"repo": j["repo"], "job": j["job"], "host": best["name"] if best else None})
+    return out
+
+
+def budget_step(c, api, now):
+    """ok | slow | lean | pause | over (runner-router.md §6a). Prunes the call list to the last hour."""
+    api["calls"] = [t for t in api.get("calls", []) if now - t < 3600]
+    if int(c["API_BUDGET_H"]) and len(api["calls"]) >= int(c["API_BUDGET_H"]):
+        return "over"
+    rem = api.get("remaining")
+    if rem is None or now >= api.get("reset", 0):
+        return "ok"  # unknown, or the rate-limit window has reset since the last response
+    if rem < 200:
+        return "pause"
+    if rem < 500:
+        return "lean"
+    if rem < 1500:
+        return "slow"
+    return "ok"
+
+
+def side_path(c, key, suffix):
+    v = c[key]
+    if v == "-":
+        return ""
+    return v or os.path.splitext(c["STATE"])[0] + suffix
+
+
+def write_tick(c, rec):
+    """Append the tick line (size-capped: one rotation to .1) and replace the heartbeat. A write
+    error is logged, never raised: the log must not stop runners from starting."""
+    path = side_path(c, "TICK_LOG", ".ticks.jsonl")
+    try:
+        if path:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            if os.path.exists(path) and os.path.getsize(path) > float(c["TICK_LOG_MAX_MB"]) * 1e6:
+                os.replace(path, path + ".1")
+            with open(path, "a") as f:
+                f.write(json.dumps(rec, separators=(",", ":")) + "\n")
+        hb = side_path(c, "HEARTBEAT", ".heartbeat.json")
+        if hb:
+            os.makedirs(os.path.dirname(hb), exist_ok=True)
+            with open(hb + ".tmp", "w") as f:
+                json.dump({"at": rec["at"], "agent_ok": rec.get("agent_ok"), "budget": rec.get("budget"),
+                           "eligible": rec.get("queued", {}).get("eligible")}, f)
+            os.replace(hb + ".tmp", hb)
+    except OSError as e:
+        log(f"WARN tick log/heartbeat not written: {e}")
+
+
+def repos(c, gh, state, refresh=True):
     """Non-archived repos of OWNER, split into eligible and excluded-public."""
     now = time.time()
     cache = state.get("repos")
-    if not cache or now - cache["at"] > int(c["REPO_CACHE_S"]):
+    if not cache or (refresh and now - cache["at"] > int(c["REPO_CACHE_S"])):
         rows, page = [], 1
         while True:
             batch = gh.call("GET", f"/user/repos?affiliation=owner&per_page=100&page={page}")
@@ -235,20 +366,68 @@ def main():
         return 2
     state = load_state(c["STATE"])
     gh = GitHub(token, state)
+    try:
+        hs = hosts(c)
+    except (OSError, ValueError) as e:
+        notify(c, state, "hosts", f"pn-minter: host registry unusable, no runner started: {e}")
+        save_state(c["STATE"], state)
+        return 1
+    c["AGENT_CMD"] = hs[0]["cmd"]  # phase 1a: runners start on the first host only
+    now = time.time()
+    tick = mode == ""  # only real ticks are budget-gated and write the tick log + heartbeat
+    rec = {"at": int(now), "hosts": [], "agent_ok": False,
+           "not_visible": {o.strip(): "not visible" for o in c["NOT_VISIBLE"].split(",") if o.strip()}}
+
+    def finish(rc):
+        if tick:
+            gh.api["calls"] = [t for t in gh.api["calls"] if time.time() - t < 3600]
+            rec["api"] = {"billable_1h": len(gh.api["calls"]), "remaining": gh.api.get("remaining")}
+            write_tick(c, rec)
+        save_state(c["STATE"], state)
+        return rc
 
     st = agent(c, "status")
     if st.returncode != 0:
         notify(c, state, "agent-down", f"pn-minter: pn-agent status failed: {st.stderr.strip()[:200]}")
-        save_state(c["STATE"], state)
-        return 1
+        rec["hosts"] = [host_view(hs[0], None)]
+        return finish(1)
     status = json.loads(st.stdout)
+    rec["agent_ok"] = True
+    views = [host_view(hs[0], status)]
+    for h in hs[1:]:
+        try:
+            r = agent(c, "status", cmd=h["cmd"])
+            views.append(host_view(h, json.loads(r.stdout) if r.returncode == 0 else None))
+        except (subprocess.TimeoutExpired, OSError, ValueError):
+            views.append(host_view(h, None))
+    rec["hosts"] = views
+
+    # API budget (runner-router.md §6a). The step is logged when it changes and paged once per
+    # ALERT_REPEAT_MIN while it is not ok. --check and --dry-run are never held back.
+    step = budget_step(c, gh.api, now)
+    rec["budget"] = step
+    if tick and step != state.get("budget_step", "ok"):
+        log(f"API budget step {state.get('budget_step', 'ok')} -> {step}: {len(gh.api['calls'])} billable "
+            f"calls in the last hour, {gh.api.get('remaining')} remaining on the token")
+        state["budget_step"] = step
+    if tick and step != "ok":
+        notify(c, state, "budget", f"pn-minter: GitHub API budget step '{step}': {len(gh.api['calls'])} billable "
+               f"calls in the last hour (cap {c['API_BUDGET_H']}), {gh.api.get('remaining')} remaining on the "
+               f"shared token. Runner starts are slowed or paused until it recovers.")
+    if tick and (step in ("over", "pause") or
+                 (step in ("slow", "lean") and now - state.get("full_tick", 0) < int(c["SLOW_TICK_S"]))):
+        rec["skipped"] = step
+        return finish(0)
+    if tick:
+        state["full_tick"] = now
+
     live = [x for x in status["containers"] if x["state"] == "running"]
     idle = {}
     for x in live:
         if not x["job"]:
             idle[x["repo"]] = idle.get(x["repo"], 0) + 1
 
-    ok, public = repos(c, gh, state)
+    ok, public = repos(c, gh, state, refresh=step != "lean")
     allow = {x.strip() for x in c["ALLOW_PUBLIC"].split(",") if x.strip()}
     ok = served_repos(c, ok)
     jobs = []
@@ -275,8 +454,9 @@ def main():
             print(f"  {j['repo']} {j['workflow']} / {j['name']} "
                   f"queued {age_min(j['created']):.0f} min  {verdict}")
         print(f"public repos not served (not in ALLOW_PUBLIC): {len(public)}")
-        save_state(c["STATE"], state)
-        return 0
+        for v in views:
+            print(f"host {v['name']}: {v['state']}, slots_free {v['slots_free']}")
+        return finish(0)
 
     eligible = sorted((j for j in jobs if j["eligible"]), key=lambda j: j["created"])
     need, stale = [], {}
@@ -311,6 +491,9 @@ def main():
         else:
             log("queue waits on the load gate or the cap (not paged): " + text)
 
+    rec["queued"] = {"eligible": len(eligible), "need": len(need), "skipped": len(jobs) - len(eligible)}
+    rec["placement"] = place(hs, views, need)
+    rec["started"] = []
     slots = status["max_jobs"] - len(live)
     started = 0
     for j in need[:max(slots, 0)]:
@@ -322,6 +505,7 @@ def main():
         if r.returncode == 0:
             state.setdefault("touched", {})[j["repo"]] = time.time()
             started += 1
+            rec["started"].append({"repo": j["repo"], "job": j["job"], "host": hs[0]["name"]})
             log(f"started runner for {j['repo']} ({j['name']}): {r.stdout.strip().splitlines()[-1]}")
         else:
             log(f"agent refused start for {j['repo']} (exit {r.returncode}): {r.stdout.strip()[-200:]}")
@@ -330,14 +514,13 @@ def main():
     # Sweep only on ticks that started nothing, against a FRESH container list:
     # a runner that registered seconds ago is briefly "offline" on GitHub, and
     # the status taken at the start of this tick does not know it yet.
-    if mode != "--dry-run" and not started and \
+    if mode != "--dry-run" and not started and step != "lean" and \
             time.time() - state.get("swept", 0) > int(c["SWEEP_S"]):
         fresh = agent(c, "status")
         if fresh.returncode == 0:
             sweep(c, gh, state, {x["name"] for x in json.loads(fresh.stdout)["containers"]})
             state["swept"] = time.time()
-    save_state(c["STATE"], state)
-    return 0
+    return finish(0)
 
 
 if __name__ == "__main__":
