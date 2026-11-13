@@ -37,3 +37,5 @@ install -m 0755 osslsigncode-2.14 /usr/bin/osslsigncode   # e.g. copied out of t
 - **Check:** `dpkg-divert --list | grep osslsigncode` shows it, and `PATH=$(cat <runner>/.path) osslsigncode --version` shows what jobs see.
 - **Undo:** `rm /usr/bin/osslsigncode && dpkg-divert --rename --remove /usr/bin/osslsigncode`.
 - **Binary compatibility:** the binary from this image is dynamically linked for Ubuntu noble. It runs on noble hosts; check `ldd` elsewhere.
+
+**Job-started hook:** `hooks/job-started.sh` runs before every job (`ACTIONS_RUNNER_HOOK_JOB_STARTED`). It removes any `ghcr.io` entry from the runner's docker config. A job that runs a plain `docker login ghcr.io` with `GITHUB_TOKEN` and never logs out leaves an expired token behind, and every later ghcr pull on that runner then fails with `failed to fetch oauth token: denied`, public images included (n4-runner-2, 2026-11-13). Other registries and keys stay. It never prints a credential, and it always exits 0, since a failing hook fails the job. Self-test: `bash hooks/test.sh`.
