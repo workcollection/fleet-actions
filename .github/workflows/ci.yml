@@ -95,11 +95,18 @@ jobs:
         uses: ./.github/actions/setup-buildx
       - run: docker buildx version
 
-      # ubuntu-latest ships PHP 8.3, so this exercises the PROBE fast path.
+      # Ask for the PHP the image already has, so this exercises the PROBE fast path. A pinned
+      # version broke when ubuntu-latest moved to 26.04 (PHP 8.5, 2026-11; t-8923f7).
+      - id: have
+        name: Preinstalled PHP version
+        run: |
+          v="$(php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;')" \
+            || { echo "::error::the runner image has no php, so the probe path cannot be tested"; exit 1; }
+          echo "v=$v" >> "$GITHUB_OUTPUT"
       - id: php
         name: setup-php composite (probe path)
         uses: ./.github/actions/setup-php
-        with: { php-version: '8.3' }
+        with: { php-version: '${{ steps.have.outputs.v }}' }
       - name: Assert probe path
         run: |
           php -v
