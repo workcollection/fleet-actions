@@ -113,7 +113,8 @@ lt(){ export MG=$(mktemp -d -p "$tmp"); : > "$MG/calls"; echo "2.0 1 1 1/1 1" > 
   [ -n "$2" ] && echo "some avg10=$2 max_of=116" > "$MG/wing"
   [ -n "${STALE_FILE:-}" ] && touch -d '5 minutes ago' "$MG/wing"
   [ -n "$3" ] && echo "$3" > "$MG/st/ladder_level"
-  [ -n "$4" ] && echo "$4" > "$MG/st/ladder_ticks"
+  # ticks are given without the v2 tag; RAW_TICKS=1 writes them as-is (an old-format file)
+  [ -n "$4" ] && { [ -n "${RAW_TICKS:-}" ] && echo "$4" || echo "v2 $4"; } > "$MG/st/ladder_ticks"
   [ -n "${SAVED:-}" ] && echo "$SAVED" > "$MG/st/ladder_saved"
   [ -n "${STALE_SINCE:-}" ] && echo $(( $(date +%s) - STALE_SINCE )) > "$MG/st/ladder_stale_since"
   [ -n "${L3_SINCE:-}" ] && echo $(( $(date +%s) - L3_SINCE )) > "$MG/st/ladder_l3_since"
@@ -152,7 +153,12 @@ lt "three dips: 4 of the last 7, stays L1"            16   1   "0 9 16 9 16 9 16
 lt "old highs outside the window do not count"       16   1   "0 16 16 16 16 9 9 9" 1 "$M" "$M" ""
 EXTRA="LADDER_SLACK=0" lt "LADDER_SLACK=0: in a row again, a dip resets" 16 1 "0 16 16 9 16 16" 1 "$M" "$M" ""
 EXTRA=""
-lt "old 4-counter state file: no error, L0"           5    0   "0 0 0 0"  0 "$M" "$M" "4 5 6"
+RAW_TICKS=1 lt "old 4-counter state file: no error, L0" 5 0 "0 0 0 0"  0 "$M" "$M" "4 5 6"
+# Old counters are not pressure inputs: "12 11 10 0" read as v2 would be calm=12 + inputs 11 10 0,
+# which with one real tick >= 10 makes 3 of 5 and enters L1 on the first tick after the upgrade.
+RAW_TICKS=1 lt "old counters are not read as inputs: stays L0" 12 0 "12 11 10 0" 0 "$M" "$M" "4 5 6"
+[ "$(cat "$MG/st/ladder_ticks")" = "v2 0 12" ] && echo "PASS ladder: old state rewritten as v2, history restarted" || { echo "FAIL ladder: ticks '$(cat "$MG/st/ladder_ticks")'"; fail=1; }
+lt "the same values tagged v2 do count (control)"     12   0   "12 11 10 0" 1 "$M" "$M" ""
 # busy > 0 for L2/L3: a clamp with no CI job cannot help the wings. L1 (hold) still works.
 lt "no busy runner: L2 held back, stays L1"           16   1   "0 16 16 16 16" 1 "$M" "$M" "" none
 [ "$(cat "$MG/st/ladder_blocked" 2>/dev/null)" = "L2 held back: 0 busy runners" ] && echo "PASS ladder: the held-back reason is kept (logged once)" || { echo "FAIL ladder: ladder_blocked '$(cat "$MG/st/ladder_blocked" 2>/dev/null)'"; fail=1; }
