@@ -40,6 +40,16 @@ ok "image without node24: fails loud, host copy kept" "[ $rc -ne 0 ] && echo \"\
 out=$(bash "$S" missing "$D" 2>&1); rc=$?
 ok "docker create fails: non-zero, host copy kept" "[ $rc -ne 0 ] && echo \"\$out\" | grep -q 'FAILED: docker create' && [ -x $D/node24/bin/node ]"
 ok "no temp or .old dirs left" "[ -z \"\$(ls -d $D.new.* $D.old 2>/dev/null)\" ]"
+# Second mv (temp -> dest) fails: the old copy must be moved back, not lost.
+cat > "$T/bin/mv" <<'M'
+#!/bin/bash
+case "$1" in *.new.*) [ -n "${STUB_MV_FAIL:-}" ] && exit 1 ;; esac
+exec /bin/mv "$@"
+M
+chmod 755 "$T/bin/mv"
+out=$(STUB_MV_FAIL=1 bash "$S" v1 "$D" 2>&1); rc=$?
+ok "failed swap: non-zero, old copy restored" "[ $rc -ne 0 ] && echo \"\$out\" | grep -q 'old copy restored' && [ \"\$($D/node24/bin/node)\" = two ] && [ ! -e $D.old ]"
+rm "$T/bin/mv"
 out=$(bash "$S" 2>&1); rc=$?
 ok "no image argument: usage, non-zero" "[ $rc -ne 0 ] && echo \"\$out\" | grep -q usage"
 [ $fail -eq 0 ] && echo "all ok"; exit $fail

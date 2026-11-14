@@ -31,5 +31,9 @@ if [ -d "$dest" ] && diff -r --no-dereference -q "$tmp" "$dest" >/dev/null 2>&1;
 fi
 verb=created
 if [ -e "$dest" ]; then mv "$dest" "$dest.old"; verb=updated; fi
-mv "$tmp" "$dest"
+if ! mv "$tmp" "$dest"; then
+  [ "$verb" = updated ] && mv "$dest.old" "$dest"   # put the old copy back before the trap clears dest.old
+  echo "sync-externals: FAILED: moving the new copy into $dest; old copy restored" >&2
+  exit 1
+fi
 echo "sync-externals: $dest $verb from $img ($(find "$dest" -mindepth 1 -maxdepth 1 -printf '%f ' | sort))"
