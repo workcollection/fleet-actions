@@ -299,11 +299,17 @@ jobs:
           # reason if any is missing — osslsigncode hard-fails on an unreachable CDP, and a signed
           # artifact whose CRL is missing would fail verification everywhere.
           crl_gate() {
-            : > "$RUNNER_TEMP/crls.pem"; missing=""
+            : > "$RUNNER_TEMP/crls.pem"; missing=""; nocdp=""
             csplit -s -z -f "$RUNNER_TEMP/c-" "$RUNNER_TEMP/chain.pem" '/BEGIN CERTIFICATE/' '{*}' || true
             for f in "$RUNNER_TEMP"/sign.crt "$RUNNER_TEMP"/c-*; do
               subj=$(openssl x509 -in "$f" -noout -subject | sed 's/^subject=//')
-              urls=$(openssl x509 -in "$f" -noout -ext crlDistributionPoints 2>/dev/null | grep -o 'URI:[^ ,]*' | cut -c5-)
+              urls=$(openssl x509 -in "$f" -noout -ext crlDistributionPoints 2>/dev/null | grep -o 'URI:[^ ,]*' | cut -c5- || true)   # no CDP: grep exits 1, and under pipefail the step died silently (t-2fc960)
+              # only a self-signed root may lack a CDP; any other cert without one can never be checked
+              # for revocation, and no retry will add a CDP to an issued cert: stop at once
+              if [ -z "$urls" ]; then
+                [ "$subj" = "$(openssl x509 -in "$f" -noout -issuer | sed 's/^issuer=//')" ] && continue
+                nocdp=$subj; return 0
+              fi
               for url in $urls; do
                 if curl -sS -m 15 --fail "$url" -o "$RUNNER_TEMP/one.crl" 2>/dev/null \
                    && { openssl crl -in "$RUNNER_TEMP/one.crl" -inform DER -outform PEM 2>/dev/null || openssl crl -in "$RUNNER_TEMP/one.crl" -outform PEM 2>/dev/null; } >> "$RUNNER_TEMP/crls.pem"; then :
@@ -337,6 +343,7 @@ jobs:
           tries=1; [ "${CATBOY_NEW_ISSUER:-}" = 1 ] && tries=13
           for t in $(seq 1 "$tries"); do
             crl_gate
+            if [ -n "$nocdp" ]; then echo "reason=no CRL distribution point in: $nocdp" >> "$GITHUB_OUTPUT"; echo "::error::no CRL distribution point in: $nocdp"; exit 1; fi
             [ -z "$missing" ] && break
             [ "$t" -lt "$tries" ] && { echo "CRL not yet published (try $t/$tries): waiting for the pki-web publish"; sleep "${CATBOY_CRL_RETRY_SLEEP:-30}"; }
           done
