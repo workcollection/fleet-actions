@@ -1,6 +1,6 @@
 """pn-agent `status` capacity block (runner router phase 0): slots = min(free job slots, memory slots), 0 on drain,
 backup window, low disk or a shut start gate; a broken capacity input never breaks `status`. Run: python3 this_file"""
-import importlib.util, io, json, os, sys, contextlib, time
+import calendar, importlib.util, io, json, os, sys, contextlib, time
 HERE = os.path.dirname(os.path.abspath(__file__))
 spec = importlib.util.spec_from_file_location("pn_agent", os.path.join(HERE, "pn-agent.py"))
 A = importlib.util.module_from_spec(spec); spec.loader.exec_module(A)
@@ -44,6 +44,20 @@ check("inside window", A.in_window("12:30-13:30", noon))
 check("outside window", not A.in_window("13:00-14:00", noon))
 check("window wrapping midnight", A.in_window("23:00-01:00", time.mktime((2026, 10, 30, 0, 30, 0, 0, 0, -1))))
 check("empty window = never", not A.in_window("", noon))
+check("second window of a list", A.in_window("02:05-02:20, 12:30-13:30", noon))
+check("outside every window of a list", not A.in_window("02:05-02:20,13:00-14:00", noon))
+utc = calendar.timegm((2026, 11, 3, 2, 10, 0, 0, 0, 0))   # 02:10Z
+check("windows in UTC", A.in_window("02:05-02:20", utc, tz="UTC") and not A.in_window("12:00-13:00", utc, tz="UTC"))
+check("windows in a named zone (02:10Z = 03:10 Berlin)", A.in_window("03:05-03:20", utc, tz="Europe/Berlin"))
+for bad, kw in (("02:05", {}), ("02:05-02:20", {"tz": "Mars/Olympus"})):
+    try:
+        A.in_window(bad, utc, **kw); check(f"bad window raises: {bad} {kw}", False)
+    except Exception:
+        check(f"bad window raises: {bad} {kw}", True)
+inwin = dict(base, BACKUP_WINDOW="00:00-23:59", BACKUP_WINDOW_TZ="UTC")
+cap = A.capacity(inwin, 0, True, "open")
+check("capacity: inside a UTC window -> 0 slots, zone named in the stop", cap["slots_free"] == 0
+      and cap["stops"] == ["backup window 00:00-23:59 UTC"], cap)
 
 check("docker memory sizes", [A.docker_mem_gb(x) for x in ("3g", "512m", "3072M")] == [3.0, 0.5, 3.0])
 

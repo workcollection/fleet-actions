@@ -19,6 +19,7 @@ written to a 0600 file, bind-mounted read-only, read by a small wrapper
 entrypoint, and deleted as soon as the runner has registered (or after
 TOKEN_FILE_MAX_S).
 """
+import datetime
 import json
 import os
 import re
@@ -62,7 +63,8 @@ DEFAULTS = {
     "HOST_NAME": "",           # name in the router's host registry; empty = the hostname
     "DRAIN": "",               # 1 = advertise 0 free slots (running jobs finish)
     "MEM_RESERVE_GB": "2",     # kept free for the host itself when counting memory slots
-    "BACKUP_WINDOW": "",       # local "HH:MM-HH:MM" (vzdump); inside it the host advertises 0 free slots
+    "BACKUP_WINDOW": "",       # "HH:MM-HH:MM[,HH:MM-HH:MM…]" (vzdump, host backup); inside one: 0 free slots
+    "BACKUP_WINDOW_TZ": "",    # IANA zone the windows are in (e.g. UTC); empty = this host's local time
 }
 PREFIX = "pn-"
 LABEL = "pn.managed"
@@ -326,14 +328,27 @@ def mem_available_gb():
     raise ValueError("MemAvailable missing from /proc/meminfo")
 
 
-def in_window(spec, now=None):
-    """True if the local time is inside "HH:MM-HH:MM" (may wrap midnight). Empty spec = never."""
+def in_window(spec, now=None, tz=""):
+    """True if the time is inside any "HH:MM-HH:MM" window of the comma list (a window may wrap midnight).
+    tz: an IANA zone the windows are written in (e.g. UTC); empty = local time. Empty spec = never.
+    A malformed window or unknown zone raises, so the capacity block fails closed (0 slots)."""
     if not spec.strip():
         return False
-    a, b = (int(h) * 60 + int(m) for h, m in (x.strip().split(":") for x in spec.split("-")))
-    t = time.localtime(now)
-    cur = t.tm_hour * 60 + t.tm_min
-    return a <= cur < b if a <= b else (cur >= a or cur < b)
+    now = time.time() if now is None else now
+    if tz.strip():
+        from zoneinfo import ZoneInfo
+        t = datetime.datetime.fromtimestamp(now, ZoneInfo(tz.strip()))
+        cur = t.hour * 60 + t.minute
+    else:
+        t = time.localtime(now)
+        cur = t.tm_hour * 60 + t.tm_min
+    for w in spec.split(","):
+        if not w.strip():
+            continue
+        a, b = (int(h) * 60 + int(m) for h, m in (x.strip().split(":") for x in w.split("-")))
+        if a <= cur < b if a <= b else (cur >= a or cur < b):
+            return True
+    return False
 
 
 def capacity(c, live, allow, why):
@@ -346,8 +361,8 @@ def capacity(c, live, allow, why):
     stops = []
     if c.get("DRAIN", "").strip() in ("1", "true", "yes"):
         stops.append("drain")
-    if in_window(c.get("BACKUP_WINDOW", "")):
-        stops.append(f"backup window {c['BACKUP_WINDOW']}")
+    if in_window(c.get("BACKUP_WINDOW", ""), tz=c.get("BACKUP_WINDOW_TZ", "")):
+        stops.append(f"backup window {c['BACKUP_WINDOW']} {c.get('BACKUP_WINDOW_TZ') or 'local'}")
     if disk_free_gb() < float(c["DISK_FREE_MIN_GB"]):
         stops.append(f"disk free < {c['DISK_FREE_MIN_GB']} GB")
     if not allow:

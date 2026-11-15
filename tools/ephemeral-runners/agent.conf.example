@@ -18,4 +18,5 @@ GATE_POLICY=load
 # HOST_NAME=n4
 # DRAIN=
 # MEM_RESERVE_GB=2
-# BACKUP_WINDOW=12:30-13:30
+# BACKUP_WINDOW=12:30-13:30            # comma list allowed: 02:05-02:20,12:00-13:10
+# BACKUP_WINDOW_TZ=                    # e.g. UTC; empty = this host's local time
