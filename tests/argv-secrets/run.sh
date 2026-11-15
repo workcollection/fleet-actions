@@ -32,6 +32,10 @@ k int; openssl x509 -req -in int.csr -CA root.pem -CAkey root.key -CAcreateseria
 # which is what made OpenSSL 3.0 drop certs from a DER+PEM bundle (a DER cert + ONE PEM cert still parses)
 k rn; openssl x509 -req -in rn.csr -CA int.pem -CAkey int.key -CAcreateserial -out rn.pem -days 1 -extfile int.ext 2>/dev/null
 k leaf; openssl x509 -req -in leaf.csr -CA rn.pem -CAkey rn.key -CAcreateserial -out leaf.pem -days 1 -extfile leaf.ext 2>/dev/null
+# pass 4 (t-2fc960): an intermediate without CDP (rnx, leaf under it has one), and a leaf without CDP (leafx)
+k rnx; openssl x509 -req -in rnx.csr -CA int.pem -CAkey int.key -CAcreateserial -out rnx.pem -days 1 -extfile <(printf "$ca_ext") 2>/dev/null
+openssl x509 -req -in leaf.csr -CA rnx.pem -CAkey rnx.key -CAcreateserial -out leafrnx.pem -days 1 -extfile leaf.ext 2>/dev/null
+openssl x509 -req -in leaf.csr -CA rn.pem -CAkey rn.key -CAcreateserial -out leafx.pem -days 1 -extfile <(printf 'extendedKeyUsage=codeSigning\n') 2>/dev/null
 # T0 under the intermediate, like the real T0 under CB0: the TSA chain then NEEDS both certs from -untrusted
 # (with T0 directly under the root, OpenSSL 3.0 read the first DER cert of a mixed bundle and still passed)
 k t0; openssl x509 -req -in t0.csr -CA int.pem -CAkey int.key -CAcreateserial -out t0.pem -days 1 -extfile <(printf "$ca_ext") 2>/dev/null
@@ -48,7 +52,10 @@ import json, secrets
 json.dump({k: 'SECRET' + k + secrets.token_hex(8) for k in ['OIDC_JWT','BAO_TOKEN','RUNNER_TOKEN','SECRET_ID','CATCMDB_TOKEN','ID_REQ_TOKEN']}, open('secrets.json','w'))
 json.dump({'chain': [open('rn.pem').read(), open('int.pem').read()], 'leaf': open('leaf.pem').read(), 'key': open('leaf.key').read()}, open('pki.json','w'))
 # pass 3: ca_chain also carries the root, which has no crlDistributionPoints (t-2fc960)
-json.dump({'chain': [open('rn.pem').read(), open('int.pem').read(), open('root.pem').read()], 'leaf': open('leaf.pem').read(), 'key': open('leaf.key').read()}, open('pki-nocdp.json','w'))"
+json.dump({'chain': [open('rn.pem').read(), open('int.pem').read(), open('root.pem').read()], 'leaf': open('leaf.pem').read(), 'key': open('leaf.key').read()}, open('pki-nocdp.json','w'))
+# pass 4: a non-self-signed cert without CDP, once as an intermediate, once as the leaf
+json.dump({'chain': [open('rnx.pem').read(), open('int.pem').read()], 'leaf': open('leafrnx.pem').read(), 'key': open('leaf.key').read()}, open('pki-nocdp-int.json','w'))
+json.dump({'chain': [open('rn.pem').read(), open('int.pem').read()], 'leaf': open('leafx.pem').read(), 'key': open('leaf.key').read()}, open('pki-nocdp-leaf.json','w'))"
 S() { python3 -c "import json;print(json.load(open('secrets.json'))['$1'])"; }
 
 setup_rt() {   # a fresh RUNNER_TEMP + GITHUB_ENV + dist/ for one pass
@@ -115,11 +122,21 @@ kill $STUB; wait $STUB 2>/dev/null
 chk "retry: new issuer flagged (CATBOY_NEW_ISSUER=1)" 'grep -q "^CATBOY_NEW_ISSUER=1" rt/env'
 chk "retry: CRL gate waited (404s), then passed" 'grep -q "try 1/13" rt/log.3 && ! grep -q "CRL not published for" rt/log.3 && grep -q "^hierarchy=staging" rt/out'
 
-# ---- pass 3: a chain cert without crlDistributionPoints: grep finds no URI and exits 1; under
-# set -euo pipefail that killed the step silently, with no reason output (t-2fc960). The gate must pass.
+# ---- pass 3: the self-signed root in ca_chain, without crlDistributionPoints: grep finds no URI and
+# exits 1; under set -euo pipefail that killed the step silently, with no reason output (t-2fc960). The gate must pass.
 unset CATBOY_CRL_RETRY_SLEEP
 setup_rt; STUB_PKI=pki-nocdp.json python3 stub.py & STUB=$!; sleep 0.7
 for i in 1 2 3; do run_step $i ".nocdp"; done
 kill $STUB; wait $STUB 2>/dev/null
-chk "CDP-less chain cert: CRL gate passed (step 3 exit 0)" '[ "$(cat rt/rc.3)" = 0 ] && ! grep -q "CRL not published for" rt/log.3 && grep -q "^hierarchy=staging" rt/out'
+chk "CDP-less self-signed root: CRL gate passed (step 3 exit 0)" '[ "$(cat rt/rc.3)" = 0 ] && ! grep -q "CRL not published for" rt/log.3 && grep -q "^hierarchy=staging" rt/out'
+
+# ---- pass 4: an intermediate / a leaf without CDP is not self-signed: the hard gate stops at once with a
+# named reason, even for a new issuer (201 -> 13 tries), since no retry can add a CDP to an issued cert
+export CATBOY_CRL_RETRY_SLEEP=1
+for x in int:rnx leaf:leaf; do cn=${x#*:}; x=${x%%:*}   # <pki-nocdp-x.json>:<CN of the cert without CDP>
+  setup_rt; STUB_ERI_CODE=201 STUB_PKI=pki-nocdp-$x.json python3 stub.py & STUB=$!; sleep 0.7
+  for i in 1 2 3; do run_step $i ".nocdp-$x"; done
+  kill $STUB; wait $STUB 2>/dev/null
+  chk "CDP-less $x: step 3 exit 1, reason names it, no retries" '[ "$(cat rt/rc.3)" = 1 ] && grep -q "^reason=no CRL distribution point in: .*harness-$cn\$" rt/out && ! grep -q "try 1/13" rt/log.3'
+done
 exit $ok
