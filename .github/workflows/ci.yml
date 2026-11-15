@@ -67,6 +67,10 @@ jobs:
         run: python3 tools/n4-ci-gate/test_gate_policy.py
       - name: runner-profile sizing rules (fake cgroup tree)
         run: python3 tools/runner-profile/test_runnerprofile.py
+      - name: runner-image job-started hook (drops a stale ghcr.io login)
+        run: bash tools/runner-image/hooks/test.sh
+      - name: runner-image sync-externals (host copy of /actions-runner/externals, stub docker)
+        run: bash tools/runner-image/test_sync_externals.sh
       - name: mari-gate scenarios (stub docker)
         run: bash tools/mari-gate/test.sh
       - name: catboy-sign step scripts (version gate, output-set assert, report)
@@ -95,11 +99,18 @@ jobs:
         uses: ./.github/actions/setup-buildx
       - run: docker buildx version
 
-      # ubuntu-latest ships PHP 8.3, so this exercises the PROBE fast path.
+      # Ask for the PHP the image already has, so this exercises the PROBE fast path. A pinned
+      # version broke when ubuntu-latest moved to 26.04 (PHP 8.5, 2026-11; t-8923f7).
+      - id: have
+        name: Preinstalled PHP version
+        run: |
+          v="$(php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;')" \
+            || { echo "::error::the runner image has no php, so the probe path cannot be tested"; exit 1; }
+          echo "v=$v" >> "$GITHUB_OUTPUT"
       - id: php
         name: setup-php composite (probe path)
         uses: ./.github/actions/setup-php
-        with: { php-version: '8.3' }
+        with: { php-version: '${{ steps.have.outputs.v }}' }
       - name: Assert probe path
         run: |
           php -v
