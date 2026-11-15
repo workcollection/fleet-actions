@@ -192,10 +192,15 @@ ladder_tick(){ local t=(0 "$LADDER_T1" "$LADDER_T2" "$LADDER_T3") n=(0 "$LADDER_
     ladder_apply "$L"; return 0
   fi
   [ -f "$STATE/ladder_stale_since" ] && { rm -f "$STATE/ladder_stale_since"; log "ladder: input fresh again (${wpsi}%)"; }
-  # $STATE/ladder_ticks: "<calm ticks> <the last max(Nk)+LADDER_SLACK inputs, oldest first>"
+  # $STATE/ladder_ticks: "v2 <calm ticks> <the last max(Nk)+LADDER_SLACK inputs, oldest first>"
   # h must be set before the read: a missing file leaves it unset, and under set -u that aborted
   # ladder_tick on every tick, so the counters were never stored and the ladder never escalated.
+  # A file without the v2 tag is the old "<>=T1> <>=T2> <>=T3> <calm>" counter format: its counts
+  # would be read as pressure inputs (a calm count of 30 as 30 %) and could escalate on the first
+  # ticks after an upgrade. Start that history afresh instead (costs at most one window of ticks).
   h=(); [ -f "$STATE/ladder_ticks" ] && read -r -a h < "$STATE/ladder_ticks"
+  if [ "${h[0]:-}" = v2 ]; then h=("${h[@]:1}")
+  elif [ "${#h[@]}" -gt 0 ]; then log "ladder: state '${h[*]}' is the old counter format: history restarted"; h=(); fi
   c=${h[0]:-0}; h=("${h[@]:1}" "$wpsi")
   w=$LADDER_N1; for k in 2 3; do [ "${n[$k]}" -gt "$w" ] && w=${n[$k]}; done; w=$(( w + LADDER_SLACK ))
   [ "${#h[@]}" -gt "$w" ] && h=("${h[@]: -$w}")
@@ -214,7 +219,7 @@ ladder_tick(){ local t=(0 "$LADDER_T1" "$LADDER_T2" "$LADDER_T3") n=(0 "$LADDER_
     if ge "$wpsi" "${t[$L]}"; then c=0; else c=$(( c + 1 )); fi
     [ "$c" -ge "$LADDER_CALM" ] && { new=$(( L - 1 )); c=0; }
   fi
-  echo "$c ${h[*]}" > "$STATE/ladder_ticks"
+  echo "v2 $c ${h[*]}" > "$STATE/ladder_ticks"
   # Log a held-back escalation once per reason, not on every tick.
   if [ -n "$block" ]; then
     [ "$(cat "$STATE/ladder_blocked" 2>/dev/null)" = "${block%% (*}" ] || log "ladder: $block (wing CPU pressure ${wpsi}%) [$LADDER]"
