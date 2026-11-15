@@ -67,6 +67,10 @@ RUN apt-get update \
  && /opt/semgrep/bin/pip install --no-cache-dir --disable-pip-version-check "semgrep==${SEMGREP_VERSION}" \
  && ln -sf /opt/semgrep/bin/semgrep /usr/local/bin/semgrep \
  && semgrep --version 2>/dev/null | grep -qx "${SEMGREP_VERSION}"
+# Job-started hook: drops a ghcr.io login an earlier job left in this long-lived runner's docker config
+# (an expired GITHUB_TOKEN there fails every later ghcr pull with 'denied'; hooks/job-started.sh).
+COPY hooks/job-started.sh /usr/local/lib/runner-hooks/job-started.sh
+ENV ACTIONS_RUNNER_HOOK_JOB_STARTED=/usr/local/lib/runner-hooks/job-started.sh
 RUN command -v curl jq openssl osslsigncode semgrep \
  && osslsigncode --version | grep -q "osslsigncode ${OSSLSIGNCODE_VERSION}," \
  && osslsigncode --version | head -1
