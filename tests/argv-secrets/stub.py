@@ -1,5 +1,5 @@
 import http.server, json, sys, os
-S = json.load(open("secrets.json")); P = json.load(open("pki.json")); seen = []
+S = json.load(open("secrets.json")); P = json.load(open(os.environ.get("STUB_PKI", "pki.json"))); seen = []   # STUB_PKI: an alternate chain (pass 3)
 import subprocess
 crl_misses = {"left": int(os.environ.get("STUB_CRL_MISSES", "0"))}   # 404 the leaf CRL N times (retry test)
 class H(http.server.BaseHTTPRequestHandler):

@@ -303,7 +303,7 @@ jobs:
             csplit -s -z -f "$RUNNER_TEMP/c-" "$RUNNER_TEMP/chain.pem" '/BEGIN CERTIFICATE/' '{*}' || true
             for f in "$RUNNER_TEMP"/sign.crt "$RUNNER_TEMP"/c-*; do
               subj=$(openssl x509 -in "$f" -noout -subject | sed 's/^subject=//')
-              urls=$(openssl x509 -in "$f" -noout -ext crlDistributionPoints 2>/dev/null | grep -o 'URI:[^ ,]*' | cut -c5-)
+              urls=$(openssl x509 -in "$f" -noout -ext crlDistributionPoints 2>/dev/null | grep -o 'URI:[^ ,]*' | cut -c5- || true)   # a chain cert without CDP: grep exits 1, and under pipefail the step died silently (t-2fc960)
               for url in $urls; do
                 if curl -sS -m 15 --fail "$url" -o "$RUNNER_TEMP/one.crl" 2>/dev/null \
                    && { openssl crl -in "$RUNNER_TEMP/one.crl" -inform DER -outform PEM 2>/dev/null || openssl crl -in "$RUNNER_TEMP/one.crl" -outform PEM 2>/dev/null; } >> "$RUNNER_TEMP/crls.pem"; then :

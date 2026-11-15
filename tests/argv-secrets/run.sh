@@ -16,7 +16,8 @@ here=$(cd "$(dirname "$0")" && pwd); WF=$(realpath "${1:-$here/../../.github/wor
 W=$(mktemp -d); [ -n "${KEEP:-}" ] || trap 'rm -rf "$W"' EXIT; echo "workdir $W"; cp "$here/stub.py" "$W/"; cd "$W" || exit 1; mkdir -p rt ca cat0; touch ca/index.txt cat0/index.txt
 python3 -c "
 import yaml,sys; w=yaml.safe_load(open(sys.argv[1]))
-for i in (1,2,3,4,5,8): open(f'step{i}.sh','w').write(w['jobs']['sign']['steps'][i]['run'])" "$WF"
+# stepN.sh keeps the harness's old numbering; the job's step indices moved when steps 0-2 (dist/, build, input set) came in
+for i, j in ((1,3),(2,4),(3,5),(4,6),(5,7),(8,11)): open(f'step{i}.sh','w').write(w['jobs']['sign']['steps'][j]['run'])" "$WF"
 # throwaway PKI: root -> intermediate (CDP) -> code-signing leaf (CDP), a real CRL for the gate,
 # and root -> T0 -> TSA leaf for RFC 3161
 printf '[ca]\ndefault_ca=d\n[d]\ndatabase=ca/index.txt\ndefault_md=sha256\ndefault_crl_days=1\n' > ca.cnf
@@ -45,7 +46,9 @@ openssl ca -config ca.cnf -gencrl -keyfile int.key -cert int.pem -out x.crl.pem 
 python3 -c "
 import json, secrets
 json.dump({k: 'SECRET' + k + secrets.token_hex(8) for k in ['OIDC_JWT','BAO_TOKEN','RUNNER_TOKEN','SECRET_ID','CATCMDB_TOKEN','ID_REQ_TOKEN']}, open('secrets.json','w'))
-json.dump({'chain': [open('rn.pem').read(), open('int.pem').read()], 'leaf': open('leaf.pem').read(), 'key': open('leaf.key').read()}, open('pki.json','w'))"
+json.dump({'chain': [open('rn.pem').read(), open('int.pem').read()], 'leaf': open('leaf.pem').read(), 'key': open('leaf.key').read()}, open('pki.json','w'))
+# pass 3: ca_chain also carries the root, which has no crlDistributionPoints (t-2fc960)
+json.dump({'chain': [open('rn.pem').read(), open('int.pem').read(), open('root.pem').read()], 'leaf': open('leaf.pem').read(), 'key': open('leaf.key').read()}, open('pki-nocdp.json','w'))"
 S() { python3 -c "import json;print(json.load(open('secrets.json'))['$1'])"; }
 
 setup_rt() {   # a fresh RUNNER_TEMP + GITHUB_ENV + dist/ for one pass
@@ -56,7 +59,7 @@ setup_rt() {   # a fresh RUNNER_TEMP + GITHUB_ENV + dist/ for one pass
 run_step() {   # run_step <i> <trace-suffix>
   set -a; . rt/env 2>/dev/null; set +a      # what GitHub does with GITHUB_ENV between steps
   strace -f -qq -e trace=execve -s 100000 -o "trace.$1$2" bash --noprofile --norc -eo pipefail "step$1.sh" > "rt/log.$1" 2>&1
-  echo "step $1 exit $?  ($(grep -c execve "trace.$1$2") execs)"
+  echo $? > "rt/rc.$1"; echo "step $1 exit $(cat "rt/rc.$1")  ($(grep -c execve "trace.$1$2") execs)"
 }
 export CURL_HOME=$PWD/rt/catboy-curl CATBOY_SIGN_VERSION=2.1.4-harness   # step env + workflow env in the real job
 export RUNNER_TEMP=$PWD/rt GITHUB_OUTPUT=$PWD/rt/out GITHUB_ENV=$PWD/rt/env GITHUB_STEP_SUMMARY=$PWD/rt/sum
@@ -111,4 +114,12 @@ for i in 1 2 3; do run_step $i ".retry"; done
 kill $STUB; wait $STUB 2>/dev/null
 chk "retry: new issuer flagged (CATBOY_NEW_ISSUER=1)" 'grep -q "^CATBOY_NEW_ISSUER=1" rt/env'
 chk "retry: CRL gate waited (404s), then passed" 'grep -q "try 1/13" rt/log.3 && ! grep -q "CRL not published for" rt/log.3 && grep -q "^hierarchy=staging" rt/out'
+
+# ---- pass 3: a chain cert without crlDistributionPoints: grep finds no URI and exits 1; under
+# set -euo pipefail that killed the step silently, with no reason output (t-2fc960). The gate must pass.
+unset CATBOY_CRL_RETRY_SLEEP
+setup_rt; STUB_PKI=pki-nocdp.json python3 stub.py & STUB=$!; sleep 0.7
+for i in 1 2 3; do run_step $i ".nocdp"; done
+kill $STUB; wait $STUB 2>/dev/null
+chk "CDP-less chain cert: CRL gate passed (step 3 exit 0)" '[ "$(cat rt/rc.3)" = 0 ] && ! grep -q "CRL not published for" rt/log.3 && grep -q "^hierarchy=staging" rt/out'
 exit $ok
